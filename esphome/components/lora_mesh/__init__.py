@@ -133,11 +133,6 @@ async def to_code(config) -> None:
 
     if radio_type == SX126x:
         cg.add_define("LORA_MESH_USE_SX126X")
-        cg.add_global(
-            cg.RawExpression(
-                '#include "esphome/components/lora_mesh/lora_radio_adapters.h"'
-            )
-        )
         adapter_id = ID(
             f"{config[CONF_ID].id}_radio_adapter",
             is_declaration=True,
@@ -148,11 +143,6 @@ async def to_code(config) -> None:
 
     elif radio_type == SX127x:
         cg.add_define("LORA_MESH_USE_SX127X")
-        cg.add_global(
-            cg.RawExpression(
-                '#include "esphome/components/lora_mesh/lora_radio_adapters.h"'
-            )
-        )
         adapter_id = ID(
             f"{config[CONF_ID].id}_radio_adapter",
             is_declaration=True,

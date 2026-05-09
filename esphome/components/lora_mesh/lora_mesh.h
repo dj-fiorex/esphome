@@ -187,3 +187,7 @@ class LoraMesh : public Component {
 };
 
 }  // namespace esphome::lora_mesh
+
+// Included after LoraMesh is fully defined — lora_radio_adapters.h calls
+// LoraMesh::on_radio_packet(), which requires the complete class definition.
+#include "lora_radio_adapters.h"
