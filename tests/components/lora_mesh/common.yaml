@@ -11,7 +11,7 @@
 lora_mesh:
   id: mesh
   radio_id: test_radio
-  node_id: "test-001"
+  node_id: !lambda 'return std::string("test-001");'
   mesh_secret: "my_mesh_secret"
   gateway: normal
   max_hops: 8
