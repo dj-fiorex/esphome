@@ -69,7 +69,7 @@ CONFIG_SCHEMA = cv.All(
             # Radio reference — either sx126x or sx127x component ID.
             cv.Required(CONF_RADIO_ID): cv.use_id(cg.Component),
             # Node / mesh identity
-            cv.Optional(CONF_NODE_ID): cv.string,
+            cv.Optional(CONF_NODE_ID): cv.templatable(cv.string),
             cv.Required(CONF_MESH_SECRET): cv.string,
             # Gateway behaviour
             cv.Optional(CONF_GATEWAY, default="normal"): cv.enum(
@@ -180,7 +180,8 @@ async def to_code(config) -> None:
 
     # ── Configuration setters ─────────────────────────────────────────────
     if CONF_NODE_ID in config:
-        cg.add(var.set_node_id(config[CONF_NODE_ID]))
+        templ = await cg.templatable(config[CONF_NODE_ID], [], cg.std_string)
+        cg.add(var.set_node_id(templ))
     cg.add(var.set_mesh_secret(config[CONF_MESH_SECRET]))
     cg.add(var.set_gateway_mode(config[CONF_GATEWAY]))
     cg.add(var.set_max_hops(config[CONF_MAX_HOPS]))

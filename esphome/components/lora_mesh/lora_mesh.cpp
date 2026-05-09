@@ -28,6 +28,9 @@ std::string LoraMesh::id_to_hex(uint32_t id) {
 
 void LoraMesh::setup() {
   // Derive numeric IDs from strings.
+  if (this->node_id_func_) {
+    this->node_id_str_ = this->node_id_func_();
+  }
   if (this->node_id_str_.empty()) {
     uint8_t mac[6];
     get_mac_address_raw(mac);
