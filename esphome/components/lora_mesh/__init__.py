@@ -180,8 +180,8 @@ async def to_code(config) -> None:
 
     # ── Configuration setters ─────────────────────────────────────────────
     if CONF_NODE_ID in config:
-        templ = await cg.templatable(config[CONF_NODE_ID], [], cg.std_string)
-        cg.add(var.set_node_id(templ))
+        node_id_templ = await cg.templatable(config[CONF_NODE_ID], [], cg.std_string)
+        cg.add(var.set_node_id(node_id_templ))
     cg.add(var.set_mesh_secret(config[CONF_MESH_SECRET]))
     cg.add(var.set_gateway_mode(config[CONF_GATEWAY]))
     cg.add(var.set_max_hops(config[CONF_MAX_HOPS]))

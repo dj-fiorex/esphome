@@ -30,6 +30,7 @@ void LoraMesh::setup() {
   // Derive numeric IDs from strings.
   if (this->node_id_func_) {
     this->node_id_str_ = this->node_id_func_();
+    this->node_id_func_ = nullptr;  // Release the lambda capture after use.
   }
   if (this->node_id_str_.empty()) {
     uint8_t mac[6];
