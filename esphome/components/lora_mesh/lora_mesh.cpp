@@ -28,15 +28,16 @@ std::string LoraMesh::id_to_hex(uint32_t id) {
 
 void LoraMesh::setup() {
   // Derive numeric IDs from strings.
-  if (this->node_id_str_.empty()) {
+  if (this->has_node_id_) {
+    this->node_id_str_ = this->node_id_template_.value();
+    this->node_id_ = fnv1a_str(this->node_id_str_);
+  } else {
     uint8_t mac[6];
     get_mac_address_raw(mac);
     this->node_id_ = fnv1a_32(mac + 3, 3);
     char buf[7];
     snprintf(buf, sizeof(buf), "%06" PRIX32, this->node_id_ & 0xFFFFFFu);
     this->node_id_str_ = buf;
-  } else {
-    this->node_id_ = fnv1a_str(this->node_id_str_);
   }
   this->mesh_id_ = fnv1a_str(this->mesh_secret_);
 
