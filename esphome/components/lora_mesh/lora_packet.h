@@ -16,7 +16,11 @@ using Packet = StaticVector<uint8_t, LORA_MAX_PACKET_SIZE>;
 // Protocol constants
 // ───────────────────────────────────────────────────────────────────────────
 
-static constexpr uint8_t MESH_PROTO_VERSION = 1;
+/** Wire protocol version carried in every HELLO body (bumped when body layout changes). */
+static constexpr uint8_t MESH_PROTO_VERSION = 2;
+
+/** Maximum length of the human-readable node name carried in HELLO packets. */
+static constexpr size_t MESH_NODE_NAME_MAX_LEN = 32;
 
 /** Broadcast destination: every node in the mesh processes the packet. */
 static constexpr uint32_t MESH_BROADCAST_ID = 0xFFFFFFFF;
@@ -64,15 +68,19 @@ static constexpr uint8_t FLAG_IS_FORWARD = 0x08;  // This is a forwarded packet
 // ───────────────────────────────────────────────────────────────────────────
 // HELLO payload (after the 24-byte header)
 //
-//   [0]  proto_version  (1 byte)
-//   [1]  route_count    (1 byte)  — number of RouteAdvertisement entries
-//   [2+] route entries  (6 bytes each)
+//   [0]                   proto_version  (1 byte)  — must equal MESH_PROTO_VERSION
+//   [1]                   name_len       (1 byte)  — byte length of node_name, 0 if absent
+//   [2 .. 2+name_len-1]   node_name      (name_len bytes, NOT NUL-terminated on wire)
+//   [2+name_len]          route_count    (1 byte)  — number of RouteAdvertisement entries
+//   [3+name_len ..]       route entries  (6 bytes each)
 //
 // RouteAdvertisement (per entry):
-//   [0..3]  dest_id    (uint32_t LE)
-//   [4]     hop_count  (uint8_t)
+//   [0..3]  dest_id      (uint32_t LE)
+//   [4]     hop_count    (uint8_t)
 //   [5]     rssi_scaled  (int8_t)  — RSSI dBm clamped to [-128, 127]
 //
+// HELLO_FIXED_SIZE is the minimum number of HELLO-body bytes required to read
+// proto_version and name_len (the two bytes needed before any further parsing).
 // ───────────────────────────────────────────────────────────────────────────
 
 static constexpr size_t HELLO_FIXED_SIZE = 2;
@@ -115,14 +123,26 @@ struct SeenEntry {
 };
 
 // ───────────────────────────────────────────────────────────────────────────
+// Node name cache entry (stored in-memory, not transmitted verbatim)
+// Maps a 32-bit node hash to the human-readable name learned from HELLO packets.
+// ───────────────────────────────────────────────────────────────────────────
+
+struct NameEntry {
+  uint32_t id{0};
+  bool is_valid{false};
+  char name[MESH_NODE_NAME_MAX_LEN + 1]{};
+};
+
+// ───────────────────────────────────────────────────────────────────────────
 // MeshMessage — payload delivered to on_message automation trigger
 // ───────────────────────────────────────────────────────────────────────────
 
 struct MeshMessage {
-  char source[9]{};       // Human-readable source (hex of src_id hash, 8 chars + NUL)
-  char destination[9]{};  // Human-readable destination
-  char prev_hop[9]{};     // Node that sent this to us
-  std::string payload;    // Application data
+  char source[9]{};                                   // Hex of src_id hash (8 chars + NUL), always present
+  char source_name[MESH_NODE_NAME_MAX_LEN + 1]{};     // Human-readable name, or empty string if unknown
+  char destination[9]{};                              // Human-readable destination
+  char prev_hop[9]{};                                 // Node that sent this to us
+  std::string payload;                         // Application data
   uint32_t msg_id{0};
   uint8_t hop_count{0};
   uint8_t ttl{0};

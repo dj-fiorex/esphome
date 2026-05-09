@@ -44,6 +44,12 @@ void LoraMesh::setup() {
   for (auto &s : this->seen_cache_) {
     s = SeenEntry{};
   }
+  for (auto &n : this->name_map_) {
+    n = NameEntry{};
+  }
+  // Store our own name so callers can resolve it without needing a HELLO.
+  this->store_node_name_(this->node_id_, this->node_id_str_.c_str(),
+                         static_cast<uint8_t>(std::min(this->node_id_str_.size(), MESH_NODE_NAME_MAX_LEN)));
 
   if (this->radio_ == nullptr) {
     ESP_LOGE(TAG, "No radio configured — marking failed");
@@ -181,7 +187,9 @@ std::string LoraMesh::get_routing_table_json() const {
   // Pre-reserve: each entry is ~90 bytes; +2 for '[' and ']'.
   size_t entry_count = this->get_known_node_count();
   std::string out;
-  out.reserve(2 + entry_count * 90);
+  // Pre-reserve: '[' + ']' + entry_count * ~130 bytes per entry
+  // (~96 base JSON + up to 32 chars for "name" field + commas and overhead).
+  out.reserve(2 + entry_count * 130);
   out = '[';
   bool first = true;
   for (const auto &r : this->routes_) {
@@ -192,12 +200,15 @@ std::string LoraMesh::get_routing_table_json() const {
       out += ',';
     }
     first = false;
-    char buf[96];
+    // Buffer: base JSON structure (~96 bytes) + "name" field (up to MESH_NODE_NAME_MAX_LEN=32) + safety margin.
+    char buf[160];
     char dst_hex[9], nh_hex[9];
     id_to_hex(r.dst_id, dst_hex);
     id_to_hex(r.next_hop_id, nh_hex);
-    snprintf(buf, sizeof(buf), R"({"dst":"%s","nh":"%s","hops":%u,"gw":%s,"rssi":%.0f})", dst_hex, nh_hex, r.hop_count,
-             r.is_gateway ? "true" : "false", static_cast<double>(r.rssi));
+    const char *name = this->lookup_node_name_(r.dst_id);
+    snprintf(buf, sizeof(buf), R"({"dst":"%s","name":"%s","nh":"%s","hops":%u,"gw":%s,"rssi":%.0f})", dst_hex,
+             name != nullptr ? name : "", nh_hex, r.hop_count, r.is_gateway ? "true" : "false",
+             static_cast<double>(r.rssi));
     out += buf;
   }
   out += ']';
@@ -267,8 +278,27 @@ void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset,
   if (pkt_len < offset + HELLO_FIXED_SIZE) {
     return;
   }
-  uint8_t route_count = pkt[offset + 1];
-  size_t pos = offset + HELLO_FIXED_SIZE;
+
+  // Reject packets from nodes running a different protocol version.
+  if (pkt[offset] != MESH_PROTO_VERSION) {
+    ESP_LOGD(TAG, "HELLO from 0x%08" PRIX32 ": proto version %u (expected %u), skipping body", src_id, pkt[offset],
+             MESH_PROTO_VERSION);
+    return;
+  }
+
+  uint8_t name_len = pkt[offset + 1];
+
+  // Ensure the packet contains name bytes and the route_count byte.
+  if (pkt_len < offset + 2 + static_cast<size_t>(name_len) + 1) {
+    return;
+  }
+
+  if (name_len > 0) {
+    this->store_node_name_(src_id, reinterpret_cast<const char *>(pkt + offset + 2), name_len);
+  }
+
+  uint8_t route_count = pkt[offset + 2 + name_len];
+  size_t pos = offset + 3 + name_len;
 
   for (uint8_t i = 0; i < route_count && pos + ROUTE_ADV_SIZE <= pkt_len; ++i, pos += ROUTE_ADV_SIZE) {
     uint32_t adv_dst = get_u32_le(pkt + pos);
@@ -287,8 +317,10 @@ void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset,
     }
   }
 
-  ESP_LOGD(TAG, "HELLO from 0x%08" PRIX32 " rssi=%.0f snr=%.1f gw=%s routes=%u", src_id, static_cast<double>(rssi),
-           static_cast<double>(snr), src_is_gateway ? "yes" : "no", route_count);
+  const char *src_name = this->lookup_node_name_(src_id);
+  ESP_LOGD(TAG, "HELLO from 0x%08" PRIX32 " name=%s rssi=%.0f snr=%.1f gw=%s routes=%u", src_id,
+           src_name != nullptr ? src_name : "?", static_cast<double>(rssi), static_cast<double>(snr),
+           src_is_gateway ? "yes" : "no", route_count);
 }
 
 // ─── DATA processing ──────────────────────────────────────────────────────────
@@ -311,6 +343,10 @@ void LoraMesh::process_data_(const uint8_t *pkt, size_t pkt_len, size_t offset, 
 
     MeshMessage msg;
     id_to_hex(src_id, msg.source);
+    const char *src_name = this->lookup_node_name_(src_id);
+    if (src_name != nullptr) {
+      snprintf(msg.source_name, sizeof(msg.source_name), "%s", src_name);
+    }
     id_to_hex(dst_id, msg.destination);
     id_to_hex(prev_hop, msg.prev_hop);
     msg.payload.assign(reinterpret_cast<const char *>(pkt + payload_start), payload_len);
@@ -386,8 +422,11 @@ Packet LoraMesh::build_hello_packet_() {
   std::sort(ptrs.begin(), ptrs.begin() + static_cast<ptrdiff_t>(count),
             [](const RouteEntry *a, const RouteEntry *b) { return a->hop_count < b->hop_count; });
 
+  size_t name_len = std::min(this->node_id_str_.size(), MESH_NODE_NAME_MAX_LEN);
+  // Overhead = proto_version(1) + name_len_field(1) + name(name_len) + route_count(1).
+  size_t hello_overhead = 3 + name_len;
   size_t max_pkt = (this->radio_ != nullptr) ? this->radio_->get_max_packet_size() : 255;
-  size_t budget = (max_pkt > MESH_HEADER_SIZE + HELLO_FIXED_SIZE) ? max_pkt - MESH_HEADER_SIZE - HELLO_FIXED_SIZE : 0;
+  size_t budget = (max_pkt > MESH_HEADER_SIZE + hello_overhead) ? max_pkt - MESH_HEADER_SIZE - hello_overhead : 0;
   size_t max_routes = std::min(budget / ROUTE_ADV_SIZE, count);
   if (max_routes > 255) {
     max_routes = 255;
@@ -396,6 +435,10 @@ Packet LoraMesh::build_hello_packet_() {
   auto pkt = this->build_header_(PacketType::HELLO, flags, MESH_BROADCAST_ID, this->next_msg_id_(), this->max_hops_, 0,
                                  this->node_id_);
   pkt.push_back(MESH_PROTO_VERSION);
+  pkt.push_back(static_cast<uint8_t>(name_len));
+  for (size_t i = 0; i < name_len; ++i) {
+    pkt.push_back(static_cast<uint8_t>(this->node_id_str_[i]));
+  }
   pkt.push_back(static_cast<uint8_t>(max_routes));
 
   for (size_t i = 0; i < max_routes; ++i) {
@@ -550,6 +593,54 @@ void LoraMesh::notify_route_changed_() {
   this->route_update_callback_();
   this->publish_diagnostics_();
 }
+
+// ─── Node name cache ──────────────────────────────────────────────────────────
+
+void LoraMesh::store_node_name_(uint32_t id, const char *name, uint8_t name_len) {
+  size_t len = std::min(static_cast<size_t>(name_len), MESH_NODE_NAME_MAX_LEN);
+
+  // Update the existing entry for this id if already known.
+  for (auto &e : this->name_map_) {
+    if (e.is_valid && e.id == id) {
+      snprintf(e.name, sizeof(e.name), "%.*s", static_cast<int>(len), name);
+      return;
+    }
+  }
+
+  // Find an unused slot.
+  for (auto &e : this->name_map_) {
+    if (!e.is_valid) {
+      e.id = id;
+      e.is_valid = true;
+      snprintf(e.name, sizeof(e.name), "%.*s", static_cast<int>(len), name);
+      return;
+    }
+  }
+
+  // Map is full: evict a stale entry whose node is no longer in the routing table.
+  // Never evict our own entry (no route to self exists in the routing table).
+  for (auto &e : this->name_map_) {
+    if (e.id != this->node_id_ && this->find_route_(e.id) == nullptr) {
+      e.id = id;
+      snprintf(e.name, sizeof(e.name), "%.*s", static_cast<int>(len), name);
+      // is_valid already true
+      return;
+    }
+  }
+
+  ESP_LOGD(TAG, "Name map full, cannot store name for 0x%08" PRIX32, id);
+}
+
+const char *LoraMesh::lookup_node_name_(uint32_t id) const {
+  for (const auto &e : this->name_map_) {
+    if (e.is_valid && e.id == id) {
+      return e.name;
+    }
+  }
+  return nullptr;
+}
+
+const char *LoraMesh::get_node_name(uint32_t id) const { return this->lookup_node_name_(id); }
 
 // ─── Duplicate suppression ───────────────────────────────────────────────────
 
