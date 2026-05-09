@@ -186,9 +186,9 @@ async def to_code(config) -> None:
     cg.add(var.set_mesh_secret(config[CONF_MESH_SECRET]))
     cg.add(var.set_gateway_mode(config[CONF_GATEWAY]))
     cg.add(var.set_max_hops(config[CONF_MAX_HOPS]))
-    cg.add(var.set_discovery_interval(config[CONF_DISCOVERY_INTERVAL].total_milliseconds))
-    cg.add(var.set_route_ttl(config[CONF_ROUTE_TTL].total_milliseconds))
-    cg.add(var.set_seen_cache_ttl(config[CONF_SEEN_CACHE_TTL].total_milliseconds))
+    cg.add(var.set_discovery_interval(int(config[CONF_DISCOVERY_INTERVAL].total_milliseconds)))
+    cg.add(var.set_route_ttl(int(config[CONF_ROUTE_TTL].total_milliseconds)))
+    cg.add(var.set_seen_cache_ttl(int(config[CONF_SEEN_CACHE_TTL].total_milliseconds)))
     cg.add(var.set_forward_messages(config[CONF_FORWARD_MESSAGES]))
 
     # ── on_message trigger — passes MeshMessage by value as 'x' ──────────

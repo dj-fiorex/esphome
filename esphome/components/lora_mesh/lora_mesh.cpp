@@ -177,7 +177,11 @@ size_t LoraMesh::get_known_node_count() const {
 }
 
 std::string LoraMesh::get_routing_table_json() const {
-  std::string out = "[";
+  // Pre-reserve: each entry is ~90 bytes; +2 for '[' and ']'.
+  size_t entry_count = this->get_known_node_count();
+  std::string out;
+  out.reserve(2 + entry_count * 90);
+  out = '[';
   bool first = true;
   for (const auto &r : this->routes_) {
     if (!r.is_valid) {
@@ -323,6 +327,9 @@ void LoraMesh::process_data_(const std::vector<uint8_t> &pkt, size_t offset, uin
     return;
   }
 
+  // Packet forwarding: we must mutate the TTL, hop_count and prev_hop fields
+  // before retransmitting, so we copy the packet.  The input is const& and
+  // the three modified bytes are in the fixed 24-byte header.
   std::vector<uint8_t> fwd(pkt);
   fwd[18] = ttl - 1;
   fwd[19] = hop_count + 1;
@@ -372,13 +379,9 @@ std::vector<uint8_t> LoraMesh::build_hello_packet_() {
       ptrs[count++] = &r;
     }
   }
-  for (size_t i = 0; i < count; ++i) {
-    for (size_t j = i + 1; j < count; ++j) {
-      if (ptrs[j]->hop_count < ptrs[i]->hop_count) {
-        std::swap(ptrs[i], ptrs[j]);
-      }
-    }
-  }
+  // Sort valid route pointers by hop_count ascending to prioritise close neighbours.
+  std::sort(ptrs.begin(), ptrs.begin() + static_cast<ptrdiff_t>(count),
+            [](const RouteEntry *a, const RouteEntry *b) { return a->hop_count < b->hop_count; });
 
   size_t max_pkt = (this->radio_ != nullptr) ? this->radio_->get_max_packet_size() : 255;
   size_t budget = (max_pkt > MESH_HEADER_SIZE + HELLO_FIXED_SIZE) ? max_pkt - MESH_HEADER_SIZE - HELLO_FIXED_SIZE : 0;
