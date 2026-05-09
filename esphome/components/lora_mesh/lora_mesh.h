@@ -42,7 +42,7 @@ class LoraMesh : public Component {
 
   // ── Configuration setters (called from Python codegen) ────────────────
   void set_radio(LoRaRadio *radio) { this->radio_ = radio; }
-  void set_node_id(TemplatableValue<std::string> node_id) {
+  void set_node_id(const TemplatableValue<std::string> &node_id) {
     this->node_id_template_ = node_id;
     this->has_node_id_ = true;
   }
@@ -145,8 +145,8 @@ class LoraMesh : public Component {
   uint32_t node_id_{0};
   uint32_t mesh_id_{0};
   std::string node_id_str_;
-  bool has_node_id_{false};
   TemplatableValue<std::string> node_id_template_;
+  bool has_node_id_{false};
   std::string mesh_secret_;
   GatewayMode gateway_mode_{GatewayMode::NORMAL};
   bool acting_as_gateway_{false};

@@ -29,7 +29,7 @@ std::string LoraMesh::id_to_hex(uint32_t id) {
 void LoraMesh::setup() {
   // Derive numeric IDs from strings.
   if (this->has_node_id_) {
-    this->node_id_str_ = this->node_id_template_.value();
+    this->node_id_str_ = std::move(this->node_id_template_.value());
     this->node_id_ = fnv1a_str(this->node_id_str_);
   } else {
     uint8_t mac[6];
