@@ -3,6 +3,8 @@
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import binary_sensor, sensor, text_sensor
+from esphome.components.sx126x import SX126x
+from esphome.components.sx127x import SX127x
 import esphome.config_validation as cv
 from esphome.const import CONF_GATEWAY, CONF_ID, CONF_ON_MESSAGE, CONF_PAYLOAD
 from esphome.core import ID
@@ -66,8 +68,11 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(LoraMesh),
-            # Radio reference — either sx126x or sx127x component ID.
-            cv.Required(CONF_RADIO_ID): cv.use_id(cg.Component),
+            # Radio reference — must be an sx126x or sx127x component ID.
+            cv.Required(CONF_RADIO_ID): cv.Any(
+                cv.use_id(SX126x),
+                cv.use_id(SX127x),
+            ),
             # Node / mesh identity
             cv.Optional(CONF_NODE_ID): cv.templatable(cv.string),
             cv.Required(CONF_MESH_SECRET): cv.string,
@@ -124,25 +129,9 @@ async def to_code(config) -> None:
     # ── Radio adapter ──────────────────────────────────────────────────────
     radio_var = await cg.get_variable(config[CONF_RADIO_ID])
 
-    # Detect the concrete radio type from the MockObj returned by get_variable.
-    # The .type attribute reflects the declared type from cg.declare_id(SX126x).
-    try:
-        from esphome.components.sx126x import SX126x  # noqa: PLC0415
-
-        sx126x_type = SX126x
-    except ImportError:
-        sx126x_type = None
-
-    try:
-        from esphome.components.sx127x import SX127x  # noqa: PLC0415
-
-        sx127x_type = SX127x
-    except ImportError:
-        sx127x_type = None
-
     radio_type = getattr(radio_var, "type", None)
 
-    if sx126x_type is not None and radio_type == sx126x_type:
+    if radio_type == SX126x:
         cg.add_define("LORA_MESH_USE_SX126X")
         cg.add_global(
             cg.RawExpression(
@@ -157,7 +146,7 @@ async def to_code(config) -> None:
         adapter = cg.new_Pvariable(adapter_id, radio_var)
         cg.add(var.set_radio(adapter))
 
-    elif sx127x_type is not None and radio_type == sx127x_type:
+    elif radio_type == SX127x:
         cg.add_define("LORA_MESH_USE_SX127X")
         cg.add_global(
             cg.RawExpression(
