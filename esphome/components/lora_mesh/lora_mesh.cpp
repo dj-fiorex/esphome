@@ -422,6 +422,8 @@ Packet LoraMesh::build_data_packet_(uint32_t dst_id, const std::string &payload)
       this->build_header_(PacketType::DATA, flags, dst_id, this->next_msg_id_(), this->max_hops_, 0, this->node_id_);
   size_t len = std::min(payload.size(), static_cast<size_t>(255));
   pkt.push_back(static_cast<uint8_t>(len));
+  // StaticVector has no range-append; push_back on uint8_t is optimised to a byte-copy
+  // loop by the compiler, which is equivalent to memcpy for trivially-copyable elements.
   for (size_t i = 0; i < len; ++i) {
     pkt.push_back(static_cast<uint8_t>(payload[i]));
   }
