@@ -5,7 +5,7 @@ import esphome.codegen as cg
 from esphome.components import binary_sensor, sensor, text_sensor
 import esphome.config_validation as cv
 from esphome.const import CONF_GATEWAY, CONF_ID, CONF_ON_MESSAGE, CONF_PAYLOAD
-from esphome.core import ID
+from esphome.core import ID, Lambda
 
 CODEOWNERS = ["@dj-fiorex"]
 MULTI_CONF = False
@@ -69,7 +69,7 @@ CONFIG_SCHEMA = cv.All(
             # Radio reference — either sx126x or sx127x component ID.
             cv.Required(CONF_RADIO_ID): cv.use_id(cg.Component),
             # Node / mesh identity
-            cv.Optional(CONF_NODE_ID): cv.string,
+            cv.Optional(CONF_NODE_ID): cv.templatable(cv.string),
             cv.Required(CONF_MESH_SECRET): cv.string,
             # Gateway behaviour
             cv.Optional(CONF_GATEWAY, default="normal"): cv.enum(
@@ -180,7 +180,12 @@ async def to_code(config) -> None:
 
     # ── Configuration setters ─────────────────────────────────────────────
     if CONF_NODE_ID in config:
-        cg.add(var.set_node_id(config[CONF_NODE_ID]))
+        node_id_conf = config[CONF_NODE_ID]
+        if isinstance(node_id_conf, Lambda):
+            template_ = await cg.process_lambda(node_id_conf, [], return_type=cg.std_string)
+            cg.add(var.set_node_id_template(template_))
+        else:
+            cg.add(var.set_node_id(node_id_conf))
     cg.add(var.set_mesh_secret(config[CONF_MESH_SECRET]))
     cg.add(var.set_gateway_mode(config[CONF_GATEWAY]))
     cg.add(var.set_max_hops(config[CONF_MAX_HOPS]))

@@ -18,6 +18,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -43,6 +44,7 @@ class LoraMesh : public Component {
   // ── Configuration setters (called from Python codegen) ────────────────
   void set_radio(LoRaRadio *radio) { this->radio_ = radio; }
   void set_node_id(const std::string &id) { this->node_id_str_ = id; }
+  void set_node_id_template(std::function<std::string()> &&f) { this->node_id_f_ = std::move(f); }
   void set_mesh_secret(const std::string &secret) { this->mesh_secret_ = secret; }
   void set_gateway_mode(GatewayMode mode) { this->gateway_mode_ = mode; }
   void set_max_hops(uint8_t max_hops) { this->max_hops_ = max_hops; }
@@ -142,6 +144,7 @@ class LoraMesh : public Component {
   uint32_t node_id_{0};
   uint32_t mesh_id_{0};
   std::string node_id_str_;
+  std::function<std::string()> node_id_f_{nullptr};
   std::string mesh_secret_;
   GatewayMode gateway_mode_{GatewayMode::NORMAL};
   bool acting_as_gateway_{false};

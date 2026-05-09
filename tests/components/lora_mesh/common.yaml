@@ -2,16 +2,23 @@
 # The radio component is provided via the test's own includes.
 #
 # Tests:
-#  - Normal node: receives messages, sends unicast and broadcast
+#  - Lambda node_id: resolved at setup() time from a global variable
+#    (also validates that the static form `node_id: "test-001"` still works)
 #  - on_message automation
 #  - on_route_update automation
 #  - on_gateway_changed automation
 #  - Actions: lora_mesh.send, lora_mesh.broadcast, lora_mesh.send_to_gateway
 
+globals:
+  - id: lora_node_id
+    type: std::string
+    restore_value: false
+    initial_value: '"test-001"'
+
 lora_mesh:
   id: mesh
   radio_id: test_radio
-  node_id: "test-001"
+  node_id: !lambda 'return id(lora_node_id);'
   mesh_secret: "my_mesh_secret"
   gateway: normal
   max_hops: 8
