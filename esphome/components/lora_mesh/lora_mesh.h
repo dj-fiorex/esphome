@@ -5,6 +5,7 @@
 #include "esphome/core/helpers.h"
 #include "lora_packet.h"
 #include "lora_radio.h"
+#include "lora_radio_adapters.h"
 
 #ifdef USE_SENSOR
 #include "esphome/components/sensor/sensor.h"
