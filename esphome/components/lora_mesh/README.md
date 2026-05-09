@@ -35,8 +35,8 @@
 ## Purpose and Features
 
 - **Multi-hop mesh**: packets are automatically relayed through intermediate nodes, extending range far beyond a single radio link.
-- **Automatic neighbour discovery**: periodic HELLO beacons let nodes find each other without any manual topology configuration.
-- **Distance-vector routing**: each HELLO beacon advertises known routes, so remote nodes learn paths through neighbours.
+- **Automatic neighbor discovery**: periodic HELLO beacons let nodes find each other without any manual topology configuration.
+- **Distance-vector routing**: each HELLO beacon advertises known routes, so remote nodes learn paths through neighbors.
 - **Duplicate suppression**: a ring-buffer seen-cache prevents the same packet being processed or forwarded more than once.
 - **Gateway abstraction**: any node can act as a gateway (bridge to another network). Sensor nodes can send data to the "best" gateway without knowing which one it is.
 - **Three sending modes**: unicast to a named node, broadcast to all nodes, or unicast to the best available gateway.
@@ -111,7 +111,7 @@
 
 ## Setup Steps
 
-1. **Wire the LoRa radio** to the ESP32 via SPI (CS, RST, BUSY/DIO0, DIO1 pins).
+1. **Wire the LoRa radio** to the ESP32 via SPI (CS, RST, BUSY (sx126x) or DIO0 (sx127x), and DIO1 pins).
 2. **Configure the radio component** (`sx126x` or `sx127x`) in your YAML, giving it an `id`.
 3. **Add `lora_mesh:`** to your YAML, referencing the radio via `radio_id`.
 4. **Choose a `mesh_secret`** — all nodes in the same mesh must share the same secret. Packets from a different secret are silently dropped.
@@ -292,7 +292,11 @@ Send a unicast message to the best known gateway (fewest hops, then highest RSSI
 ```yaml
 - lora_mesh.send_to_gateway:
     id: mesh
-    payload: !lambda 'return "temp=" + to_string(id(temperature).state);'
+    # Note: avoid std::to_string() in production; use snprintf into a char buffer instead.
+    payload: !lambda |-
+      char buf[32];
+      snprintf(buf, sizeof(buf), "temp=%.1f", id(temperature).state);
+      return std::string(buf);
 ```
 
 | Parameter | Type | Description |
@@ -450,8 +454,10 @@ interval:
       - lora_mesh.send_to_gateway:
           id: mesh
           payload: !lambda |-
-            return "temp=" + to_string(id(temperature).state)
-                 + ",hum=" + to_string(id(humidity).state);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "temp=%.1f,hum=%.1f",
+                     id(temperature).state, id(humidity).state);
+            return std::string(buf);
 ```
 
 ---
@@ -560,7 +566,7 @@ Routes are sorted by hop count ascending. The number of routes advertised is lim
 `lora_mesh` uses a simple **distance-vector** algorithm:
 
 1. **Direct routes** — When a HELLO beacon is received, a direct route to the sender is created with `hop_count = 1`.
-2. **Indirect routes** — Routes advertised inside a HELLO are accepted only if the new path (`advertised_hops + 1`) is better (fewer hops, or same hops with higher RSSI) than any existing route.
+2. **Indirect routes** — Routes advertised inside a HELLO are accepted if the new path (`advertised_hops + 1`) has fewer hops than the existing route, or the same hop count but strictly higher RSSI (any improvement, no minimum threshold). Because RSSI measurements fluctuate with RF conditions, this can cause minor route oscillation in borderline-signal scenarios — tuning `route_ttl` longer reduces churn.
 3. **Best path selection** — Fewest hops wins. Ties are broken by highest RSSI.
 4. **Table full eviction** — When `max_routes` is reached, the entry with the most hops (or lowest RSSI on tie) is evicted to make room.
 5. **TTL expiry** — Routes not refreshed within `route_ttl` are removed. Expiry checks run every 10 seconds.
@@ -593,7 +599,7 @@ Routes are sorted by hop count ascending. The number of routes advertised is lim
 
 ## Troubleshooting
 
-### No HELLO messages received from neighbours
+### No HELLO messages received from neighbors
 
 - Verify all nodes share exactly the same `mesh_secret`.
 - Confirm the `sx126x`/`sx127x` frequency, bandwidth, spreading factor, and coding rate are identical across all devices.
@@ -609,7 +615,7 @@ Routes are sorted by hop count ascending. The number of routes advertised is lim
 ### `send_to_gateway` always returns false / "no gateway in routing table"
 
 - Ensure at least one node in the mesh is configured with `gateway: gateway` or `gateway: auto` (with Wi-Fi connected).
-- Wait for HELLO beacons to propagate. Gateway status is learnt from HELLO packets.
+- Wait for HELLO beacons to propagate. Gateway status is learned from HELLO packets.
 - Check `gateway_available_sensor_id` if configured.
 
 ### Routing table fills up quickly
