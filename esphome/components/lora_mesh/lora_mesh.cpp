@@ -18,11 +18,7 @@ static const char *const TAG = "lora_mesh";
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
 
-std::string LoraMesh::id_to_hex(uint32_t id) {
-  char buf[9];
-  snprintf(buf, sizeof(buf), "%08" PRIX32, id);
-  return {buf};
-}
+void LoraMesh::id_to_hex(uint32_t id, char out[9]) { snprintf(out, 9, "%08" PRIX32, id); }
 
 // ─── Component lifecycle ──────────────────────────────────────────────────────
 
@@ -68,8 +64,7 @@ void LoraMesh::setup() {
   this->last_hello_ = millis() - this->discovery_interval_ms_ + jitter_ms;
 
   ESP_LOGI(TAG, "LoraMesh setup: node_id=%s (0x%08" PRIX32 ") mesh_id=0x%08" PRIX32 " gw=%s",
-           this->node_id_str_.c_str(), this->node_id_, this->mesh_id_,
-           this->acting_as_gateway_ ? "yes" : "no");
+           this->node_id_str_.c_str(), this->node_id_, this->mesh_id_, this->acting_as_gateway_ ? "yes" : "no");
 }
 
 void LoraMesh::loop() {
@@ -106,7 +101,7 @@ void LoraMesh::dump_config() {
   ESP_LOGCONFIG(TAG, "  Gateway mode: %s",
                 this->gateway_mode_ == GatewayMode::NORMAL    ? "normal"
                 : this->gateway_mode_ == GatewayMode::GATEWAY ? "gateway"
-                                                               : "auto");
+                                                              : "auto");
   ESP_LOGCONFIG(TAG, "  Acting as gateway: %s", this->acting_as_gateway_ ? "yes" : "no");
   ESP_LOGCONFIG(TAG, "  Max hops: %u", this->max_hops_);
   ESP_LOGCONFIG(TAG, "  Discovery interval: %" PRIu32 " ms", this->discovery_interval_ms_);
@@ -156,7 +151,12 @@ bool LoraMesh::has_gateway() const { return this->find_best_gateway_route_() != 
 
 std::string LoraMesh::get_best_gateway() const {
   const RouteEntry *gw = this->find_best_gateway_route_();
-  return (gw != nullptr) ? id_to_hex(gw->dst_id) : std::string{};
+  if (gw == nullptr) {
+    return {};
+  }
+  char buf[9];
+  id_to_hex(gw->dst_id, buf);
+  return buf;
 }
 
 void LoraMesh::clear_routes() {
@@ -193,8 +193,10 @@ std::string LoraMesh::get_routing_table_json() const {
     }
     first = false;
     char buf[96];
-    snprintf(buf, sizeof(buf), R"({"dst":"%s","nh":"%s","hops":%u,"gw":%s,"rssi":%.0f})",
-             id_to_hex(r.dst_id).c_str(), id_to_hex(r.next_hop_id).c_str(), r.hop_count,
+    char dst_hex[9], nh_hex[9];
+    id_to_hex(r.dst_id, dst_hex);
+    id_to_hex(r.next_hop_id, nh_hex);
+    snprintf(buf, sizeof(buf), R"({"dst":"%s","nh":"%s","hops":%u,"gw":%s,"rssi":%.0f})", dst_hex, nh_hex, r.hop_count,
              r.is_gateway ? "true" : "false", static_cast<double>(r.rssi));
     out += buf;
   }
@@ -204,12 +206,12 @@ std::string LoraMesh::get_routing_table_json() const {
 
 // ─── Radio packet dispatcher ──────────────────────────────────────────────────
 
-void LoraMesh::on_radio_packet(const std::vector<uint8_t> &pkt, float rssi, float snr) {
-  if (pkt.size() < MESH_HEADER_SIZE) {
-    ESP_LOGW(TAG, "Packet too short (%zu bytes), dropped", pkt.size());
+void LoraMesh::on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, float snr) {
+  if (pkt_len < MESH_HEADER_SIZE) {
+    ESP_LOGW(TAG, "Packet too short (%zu bytes), dropped", pkt_len);
     return;
   }
-  const uint8_t *h = pkt.data();
+  const uint8_t *h = pkt;
 
   // Mesh ID filter.
   uint32_t mesh_id = get_u32_le(h + 0);
@@ -243,10 +245,11 @@ void LoraMesh::on_radio_packet(const std::vector<uint8_t> &pkt, float rssi, floa
 
   switch (pkt_type) {
     case PacketType::HELLO:
-      this->process_hello_(pkt, MESH_HEADER_SIZE, src_id, src_is_gw, prev_hop, rssi, snr);
+      this->process_hello_(pkt, pkt_len, MESH_HEADER_SIZE, src_id, src_is_gw, prev_hop, rssi, snr);
       break;
     case PacketType::DATA:
-      this->process_data_(pkt, MESH_HEADER_SIZE, src_id, dst_id, msg_id, ttl, hop_count, prev_hop, flags, rssi, snr);
+      this->process_data_(pkt, pkt_len, MESH_HEADER_SIZE, src_id, dst_id, msg_id, ttl, hop_count, prev_hop, flags, rssi,
+                          snr);
       break;
     default:
       ESP_LOGD(TAG, "Unhandled packet type %u from 0x%08" PRIX32, static_cast<uint8_t>(pkt_type), src_id);
@@ -256,19 +259,19 @@ void LoraMesh::on_radio_packet(const std::vector<uint8_t> &pkt, float rssi, floa
 
 // ─── HELLO processing ─────────────────────────────────────────────────────────
 
-void LoraMesh::process_hello_(const std::vector<uint8_t> &pkt, size_t offset, uint32_t src_id, bool src_is_gateway,
-                               uint32_t prev_hop, float rssi, float snr) {
+void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset, uint32_t src_id, bool src_is_gateway,
+                              uint32_t prev_hop, float rssi, float snr) {
   // Always create/update a direct route to the sender.
   this->update_route_(src_id, src_id, 1, src_is_gateway, rssi, snr);
 
-  if (pkt.size() < offset + HELLO_FIXED_SIZE) {
+  if (pkt_len < offset + HELLO_FIXED_SIZE) {
     return;
   }
   uint8_t route_count = pkt[offset + 1];
   size_t pos = offset + HELLO_FIXED_SIZE;
 
-  for (uint8_t i = 0; i < route_count && pos + ROUTE_ADV_SIZE <= pkt.size(); ++i, pos += ROUTE_ADV_SIZE) {
-    uint32_t adv_dst = get_u32_le(pkt.data() + pos);
+  for (uint8_t i = 0; i < route_count && pos + ROUTE_ADV_SIZE <= pkt_len; ++i, pos += ROUTE_ADV_SIZE) {
+    uint32_t adv_dst = get_u32_le(pkt + pos);
     uint8_t adv_hops = pkt[pos + 4];
 
     if (adv_dst == this->node_id_ || adv_dst == src_id) {
@@ -290,27 +293,27 @@ void LoraMesh::process_hello_(const std::vector<uint8_t> &pkt, size_t offset, ui
 
 // ─── DATA processing ──────────────────────────────────────────────────────────
 
-void LoraMesh::process_data_(const std::vector<uint8_t> &pkt, size_t offset, uint32_t src_id, uint32_t dst_id,
-                              uint32_t msg_id, uint8_t ttl, uint8_t hop_count, uint32_t prev_hop, uint8_t flags,
-                              float rssi, float snr) {
+void LoraMesh::process_data_(const uint8_t *pkt, size_t pkt_len, size_t offset, uint32_t src_id, uint32_t dst_id,
+                             uint32_t msg_id, uint8_t ttl, uint8_t hop_count, uint32_t prev_hop, uint8_t flags,
+                             float rssi, float snr) {
   bool is_broadcast = (dst_id == MESH_BROADCAST_ID) || ((flags & FLAG_IS_BROADCAST) != 0);
   bool is_for_us = is_broadcast || (dst_id == this->node_id_);
 
   if (is_for_us) {
-    if (pkt.size() < offset + 1) {
+    if (pkt_len < offset + 1) {
       return;
     }
     uint8_t payload_len = pkt[offset];
     size_t payload_start = offset + 1;
-    if (pkt.size() < payload_start + payload_len) {
+    if (pkt_len < payload_start + payload_len) {
       return;
     }
 
     MeshMessage msg;
-    msg.source = id_to_hex(src_id);
-    msg.destination = id_to_hex(dst_id);
-    msg.prev_hop = id_to_hex(prev_hop);
-    msg.payload.assign(reinterpret_cast<const char *>(pkt.data() + payload_start), payload_len);
+    id_to_hex(src_id, msg.source);
+    id_to_hex(dst_id, msg.destination);
+    id_to_hex(prev_hop, msg.prev_hop);
+    msg.payload.assign(reinterpret_cast<const char *>(pkt + payload_start), payload_len);
     msg.msg_id = msg_id;
     msg.hop_count = hop_count;
     msg.ttl = ttl;
@@ -328,10 +331,9 @@ void LoraMesh::process_data_(const std::vector<uint8_t> &pkt, size_t offset, uin
     return;
   }
 
-  // Packet forwarding: we must mutate the TTL, hop_count and prev_hop fields
-  // before retransmitting, so we copy the packet.  The input is const& and
-  // the three modified bytes are in the fixed 24-byte header.
-  std::vector<uint8_t> fwd(pkt);
+  // Packet forwarding: copy the incoming packet into a stack-allocated Packet,
+  // then patch the TTL, hop_count and prev_hop fields before retransmitting.
+  Packet fwd(pkt, pkt + pkt_len);
   fwd[18] = ttl - 1;
   fwd[19] = hop_count + 1;
   put_u32_le(&fwd[20], this->node_id_);
@@ -353,22 +355,22 @@ void LoraMesh::process_data_(const std::vector<uint8_t> &pkt, size_t offset, uin
 
 // ─── Packet builders ──────────────────────────────────────────────────────────
 
-std::vector<uint8_t> LoraMesh::build_header_(PacketType type, uint8_t flags, uint32_t dst_id, uint32_t msg_id,
-                                             uint8_t ttl, uint8_t hop_count, uint32_t prev_hop) const {
-  std::vector<uint8_t> h(MESH_HEADER_SIZE);
-  put_u32_le(h.data() + 0, this->mesh_id_);
-  h[4] = static_cast<uint8_t>(type);
-  h[5] = flags;
-  put_u32_le(h.data() + 6, this->node_id_);
-  put_u32_le(h.data() + 10, dst_id);
-  put_u32_le(h.data() + 14, msg_id);
-  h[18] = ttl;
-  h[19] = hop_count;
-  put_u32_le(h.data() + 20, prev_hop);
-  return h;
+Packet LoraMesh::build_header_(PacketType type, uint8_t flags, uint32_t dst_id, uint32_t msg_id, uint8_t ttl,
+                               uint8_t hop_count, uint32_t prev_hop) const {
+  uint8_t buf[MESH_HEADER_SIZE]{};
+  put_u32_le(buf + 0, this->mesh_id_);
+  buf[4] = static_cast<uint8_t>(type);
+  buf[5] = flags;
+  put_u32_le(buf + 6, this->node_id_);
+  put_u32_le(buf + 10, dst_id);
+  put_u32_le(buf + 14, msg_id);
+  buf[18] = ttl;
+  buf[19] = hop_count;
+  put_u32_le(buf + 20, prev_hop);
+  return Packet(buf, buf + MESH_HEADER_SIZE);
 }
 
-std::vector<uint8_t> LoraMesh::build_hello_packet_() {
+Packet LoraMesh::build_hello_packet_() {
   uint8_t flags = this->acting_as_gateway_ ? FLAG_IS_GATEWAY : 0;
 
   // Collect valid routes, sorted by hop_count ascending.
@@ -391,9 +393,8 @@ std::vector<uint8_t> LoraMesh::build_hello_packet_() {
     max_routes = 255;
   }
 
-  auto pkt = this->build_header_(PacketType::HELLO, flags, MESH_BROADCAST_ID, this->next_msg_id_(), this->max_hops_,
-                                 0, this->node_id_);
-  pkt.reserve(pkt.size() + HELLO_FIXED_SIZE + max_routes * ROUTE_ADV_SIZE);
+  auto pkt = this->build_header_(PacketType::HELLO, flags, MESH_BROADCAST_ID, this->next_msg_id_(), this->max_hops_, 0,
+                                 this->node_id_);
   pkt.push_back(MESH_PROTO_VERSION);
   pkt.push_back(static_cast<uint8_t>(max_routes));
 
@@ -405,25 +406,29 @@ std::vector<uint8_t> LoraMesh::build_hello_packet_() {
     int clamped = static_cast<int>(r->rssi);
     clamped = (clamped < -128) ? -128 : (clamped > 127) ? 127 : clamped;
     entry[5] = static_cast<uint8_t>(static_cast<int8_t>(clamped));
-    pkt.insert(pkt.end(), entry, entry + ROUTE_ADV_SIZE);
+    for (size_t j = 0; j < ROUTE_ADV_SIZE; ++j) {
+      pkt.push_back(entry[j]);
+    }
   }
   return pkt;
 }
 
-std::vector<uint8_t> LoraMesh::build_data_packet_(uint32_t dst_id, const std::string &payload) {
+Packet LoraMesh::build_data_packet_(uint32_t dst_id, const std::string &payload) {
   uint8_t flags = this->acting_as_gateway_ ? FLAG_IS_GATEWAY : 0;
   if (dst_id == MESH_BROADCAST_ID) {
     flags |= FLAG_IS_BROADCAST;
   }
-  auto pkt = this->build_header_(PacketType::DATA, flags, dst_id, this->next_msg_id_(), this->max_hops_, 0,
-                                 this->node_id_);
+  auto pkt =
+      this->build_header_(PacketType::DATA, flags, dst_id, this->next_msg_id_(), this->max_hops_, 0, this->node_id_);
   size_t len = std::min(payload.size(), static_cast<size_t>(255));
   pkt.push_back(static_cast<uint8_t>(len));
-  pkt.insert(pkt.end(), payload.begin(), payload.begin() + static_cast<ptrdiff_t>(len));
+  for (size_t i = 0; i < len; ++i) {
+    pkt.push_back(static_cast<uint8_t>(payload[i]));
+  }
   return pkt;
 }
 
-void LoraMesh::transmit_(const std::vector<uint8_t> &pkt) {
+void LoraMesh::transmit_(const Packet &pkt) {
   if (this->radio_ != nullptr) {
     this->radio_->transmit_packet(pkt);
   }
@@ -455,8 +460,7 @@ RouteEntry *LoraMesh::find_best_gateway_route_() {
     if (!r.is_valid || !r.is_gateway) {
       continue;
     }
-    if (best == nullptr || r.hop_count < best->hop_count ||
-        (r.hop_count == best->hop_count && r.rssi > best->rssi)) {
+    if (best == nullptr || r.hop_count < best->hop_count || (r.hop_count == best->hop_count && r.rssi > best->rssi)) {
       best = &r;
     }
   }
@@ -469,8 +473,7 @@ const RouteEntry *LoraMesh::find_best_gateway_route_() const {
     if (!r.is_valid || !r.is_gateway) {
       continue;
     }
-    if (best == nullptr || r.hop_count < best->hop_count ||
-        (r.hop_count == best->hop_count && r.rssi > best->rssi)) {
+    if (best == nullptr || r.hop_count < best->hop_count || (r.hop_count == best->hop_count && r.rssi > best->rssi)) {
       best = &r;
     }
   }
@@ -510,8 +513,7 @@ void LoraMesh::update_route_(uint32_t dst_id, uint32_t next_hop, uint8_t hops, b
     r->dst_id = dst_id;
     changed = true;
   }
-  if (!r->is_valid || hops < r->hop_count || (hops == r->hop_count && rssi > r->rssi) ||
-      r->next_hop_id != next_hop) {
+  if (!r->is_valid || hops < r->hop_count || (hops == r->hop_count && rssi > r->rssi) || r->next_hop_id != next_hop) {
     r->next_hop_id = next_hop;
     r->hop_count = hops;
     r->is_gateway = is_gw;

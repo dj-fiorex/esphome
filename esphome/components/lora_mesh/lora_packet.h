@@ -1,9 +1,16 @@
 #pragma once
 
+#include "esphome/core/helpers.h"
 #include <cstdint>
 #include <string>
 
 namespace esphome::lora_mesh {
+
+/** Maximum LoRa payload size (physical radio limit). */
+static constexpr size_t LORA_MAX_PACKET_SIZE = 255;
+
+/** Fixed-capacity packet buffer — fits any LoRa frame, zero heap allocation. */
+using Packet = StaticVector<uint8_t, LORA_MAX_PACKET_SIZE>;
 
 // ───────────────────────────────────────────────────────────────────────────
 // Protocol constants
@@ -49,10 +56,10 @@ enum class PacketType : uint8_t {
 // Flags bitfield (byte 5)
 // ───────────────────────────────────────────────────────────────────────────
 
-static constexpr uint8_t FLAG_IS_GATEWAY = 0x01;   // Sender is a gateway
-static constexpr uint8_t FLAG_IS_BROADCAST = 0x02; // Packet is a broadcast
+static constexpr uint8_t FLAG_IS_GATEWAY = 0x01;    // Sender is a gateway
+static constexpr uint8_t FLAG_IS_BROADCAST = 0x02;  // Packet is a broadcast
 static constexpr uint8_t FLAG_ACK_REQUESTED = 0x04;
-static constexpr uint8_t FLAG_IS_FORWARD = 0x08;   // This is a forwarded packet
+static constexpr uint8_t FLAG_IS_FORWARD = 0x08;  // This is a forwarded packet
 
 // ───────────────────────────────────────────────────────────────────────────
 // HELLO payload (after the 24-byte header)
@@ -112,10 +119,10 @@ struct SeenEntry {
 // ───────────────────────────────────────────────────────────────────────────
 
 struct MeshMessage {
-  std::string source;       // Human-readable source (hex of src_id hash)
-  std::string destination;  // Human-readable destination
-  std::string prev_hop;     // Node that sent this to us
-  std::string payload;      // Application data
+  char source[9]{};       // Human-readable source (hex of src_id hash, 8 chars + NUL)
+  char destination[9]{};  // Human-readable destination
+  char prev_hop[9]{};     // Node that sent this to us
+  std::string payload;    // Application data
   uint32_t msg_id{0};
   uint8_t hop_count{0};
   uint8_t ttl{0};
@@ -164,8 +171,8 @@ inline void put_u32_le(uint8_t *buf, uint32_t v) {
 }
 
 inline uint32_t get_u32_le(const uint8_t *buf) {
-  return static_cast<uint32_t>(buf[0]) | (static_cast<uint32_t>(buf[1]) << 8) |
-         (static_cast<uint32_t>(buf[2]) << 16) | (static_cast<uint32_t>(buf[3]) << 24);
+  return static_cast<uint32_t>(buf[0]) | (static_cast<uint32_t>(buf[1]) << 8) | (static_cast<uint32_t>(buf[2]) << 16) |
+         (static_cast<uint32_t>(buf[3]) << 24);
 }
 
 }  // namespace esphome::lora_mesh
