@@ -497,18 +497,23 @@ This document provides essential context for AI models interacting with this pro
            std::array<uint8_t, 256> buffer;
            ```
 
-        2. **Compile-time-known fixed sizes with vector-like API:** Use `StaticVector` from `esphome/core/helpers.h` for compile-time fixed size with `push_back()` interface (no dynamic allocation).
+        2. **Compile-time max, variable count, vector-like API:** Use `StaticVector` from `esphome/core/helpers.h` when the **maximum** element count is known at compile time but the **actual** count varies at runtime (e.g. component lists, listeners, services). No heap allocation — all N slots are stored inline just like `std::array<T, N>`.
            ```cpp
            // Bad - generates STL realloc code (_M_realloc_insert)
            std::vector<ServiceRecord> services;
            services.reserve(5);  // Still includes reallocation machinery
 
-           // Good - compile-time fixed size, no dynamic allocation
+           // Good - compile-time max, no heap allocation
            StaticVector<ServiceRecord, MAX_SERVICES> services;
            services.push_back(record1);
            ```
            Use `cg.add_define("MAX_SERVICES", count)` to set the size from Python configuration.
-           Like `std::array` but with vector-like API (`push_back()`, `size()`) and no STL reallocation code.
+           **Benefits:**
+           - Eliminates all heap allocation and reallocation machinery (`_M_realloc_insert`, `_M_default_append`, `operator new`)
+           - No heap fragmentation — memory is inline in the class/struct
+           - Vector-like API (`push_back()`, `size()`, range-for) without STL overhead
+           > **Memory tradeoff:** Always occupies `N × sizeof(T) + sizeof(size_t)` bytes regardless of actual count. If N is large and typical usage is sparse (e.g. only 2 out of 100 slots used), `FixedVector` may use less total RAM despite its single heap allocation.
+           > **Silent overflow:** `push_back()` silently ignores elements beyond N — no exception or assertion. Ensure N is sized correctly via `cg.add_define`.
 
         3. **Runtime-known sizes:** Use `FixedVector` from `esphome/core/helpers.h` when the size is only known at runtime initialization.
            ```cpp
