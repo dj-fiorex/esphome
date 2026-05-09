@@ -19,7 +19,6 @@
 #include <array>
 #include <cstdint>
 #include <string>
-#include <vector>
 
 namespace esphome::lora_mesh {
 
@@ -68,7 +67,7 @@ class LoraMesh : public Component {
   size_t get_known_node_count() const;
 
   // ── Called by the radio adapter when a packet arrives ────────────────
-  void on_radio_packet(const std::vector<uint8_t> &pkt, float rssi, float snr);
+  void on_radio_packet(const uint8_t *data, size_t len, float rssi, float snr);
 
   // ── Callback registrations (used by build_callback_automation) ───────
 
@@ -101,16 +100,16 @@ class LoraMesh : public Component {
 
  protected:
   // ── Packet building ────────────────────────────────────────────────────
-  std::vector<uint8_t> build_header_(PacketType type, uint8_t flags, uint32_t dst_id, uint32_t msg_id, uint8_t ttl,
-                                     uint8_t hop_count, uint32_t prev_hop) const;
-  std::vector<uint8_t> build_hello_packet_();
-  std::vector<uint8_t> build_data_packet_(uint32_t dst_id, const std::string &payload);
-  void transmit_(const std::vector<uint8_t> &pkt);
+  Packet build_header_(PacketType type, uint8_t flags, uint32_t dst_id, uint32_t msg_id, uint8_t ttl, uint8_t hop_count,
+                       uint32_t prev_hop) const;
+  Packet build_hello_packet_();
+  Packet build_data_packet_(uint32_t dst_id, const std::string &payload);
+  void transmit_(const Packet &pkt);
 
   // ── Packet processing ──────────────────────────────────────────────────
-  void process_hello_(const std::vector<uint8_t> &pkt, size_t offset, uint32_t src_id, bool src_is_gateway,
+  void process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset, uint32_t src_id, bool src_is_gateway,
                       uint32_t prev_hop, float rssi, float snr);
-  void process_data_(const std::vector<uint8_t> &pkt, size_t offset, uint32_t src_id, uint32_t dst_id,
+  void process_data_(const uint8_t *pkt, size_t pkt_len, size_t offset, uint32_t src_id, uint32_t dst_id,
                      uint32_t msg_id, uint8_t ttl, uint8_t hop_count, uint32_t prev_hop, uint8_t flags, float rssi,
                      float snr);
 
@@ -137,7 +136,7 @@ class LoraMesh : public Component {
   void publish_diagnostics_();
 
   // ── Utility ───────────────────────────────────────────────────────────
-  static std::string id_to_hex(uint32_t id);
+  static void id_to_hex(uint32_t id, char out[9]);
   uint32_t next_msg_id_() { return ++this->seq_counter_; }
 
   // ── State ──────────────────────────────────────────────────────────────

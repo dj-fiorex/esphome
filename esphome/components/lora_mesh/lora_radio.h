@@ -1,8 +1,8 @@
 #pragma once
 
+#include "lora_packet.h"
 #include <cstddef>
 #include <cstdint>
-#include <vector>
 
 namespace esphome::lora_mesh {
 
@@ -20,7 +20,7 @@ class LoRaRadio {
   virtual ~LoRaRadio() = default;
 
   /** Transmit a raw byte buffer via the LoRa radio. */
-  virtual void transmit_packet(const std::vector<uint8_t> &data) = 0;
+  virtual void transmit_packet(const Packet &data) = 0;
 
   /** Return the maximum payload size supported by the underlying radio. */
   virtual size_t get_max_packet_size() = 0;

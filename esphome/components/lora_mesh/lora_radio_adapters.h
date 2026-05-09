@@ -5,6 +5,7 @@
 // component is configured in the user's YAML.
 
 #include "lora_radio.h"
+#include <vector>
 
 #ifdef LORA_MESH_USE_SX126X
 #include "esphome/components/sx126x/sx126x.h"
@@ -21,7 +22,11 @@ class LoRaSX126xRadio : public LoRaRadio, public sx126x::SX126xListener {
  public:
   explicit LoRaSX126xRadio(sx126x::SX126x *radio) : radio_(radio) {}
 
-  void transmit_packet(const std::vector<uint8_t> &data) override { this->radio_->transmit_packet(data); }
+  void transmit_packet(const Packet &data) override {
+    // Convert the stack-allocated Packet to the vector the sx126x API expects.
+    std::vector<uint8_t> vec(data.begin(), data.end());
+    this->radio_->transmit_packet(vec);
+  }
 
   size_t get_max_packet_size() override { return this->radio_->get_max_packet_size(); }
 
@@ -32,7 +37,7 @@ class LoRaSX126xRadio : public LoRaRadio, public sx126x::SX126xListener {
 
   void on_packet(const std::vector<uint8_t> &packet, float rssi, float snr) override {
     if (this->mesh_ != nullptr) {
-      this->mesh_->on_radio_packet(packet, rssi, snr);
+      this->mesh_->on_radio_packet(packet.data(), packet.size(), rssi, snr);
     }
   }
 
@@ -58,7 +63,11 @@ class LoRaSX127xRadio : public LoRaRadio, public sx127x::SX127xListener {
  public:
   explicit LoRaSX127xRadio(sx127x::SX127x *radio) : radio_(radio) {}
 
-  void transmit_packet(const std::vector<uint8_t> &data) override { this->radio_->transmit_packet(data); }
+  void transmit_packet(const Packet &data) override {
+    // Convert the stack-allocated Packet to the vector the sx127x API expects.
+    std::vector<uint8_t> vec(data.begin(), data.end());
+    this->radio_->transmit_packet(vec);
+  }
 
   size_t get_max_packet_size() override { return this->radio_->get_max_packet_size(); }
 
@@ -69,7 +78,7 @@ class LoRaSX127xRadio : public LoRaRadio, public sx127x::SX127xListener {
 
   void on_packet(const std::vector<uint8_t> &packet, float rssi, float snr) override {
     if (this->mesh_ != nullptr) {
-      this->mesh_->on_radio_packet(packet, rssi, snr);
+      this->mesh_->on_radio_packet(packet.data(), packet.size(), rssi, snr);
     }
   }
 
