@@ -5,7 +5,6 @@
 #include "esphome/core/helpers.h"
 #include "lora_packet.h"
 #include "lora_radio.h"
-#include "lora_radio_adapters.h"
 
 #ifdef USE_SENSOR
 #include "esphome/components/sensor/sensor.h"
@@ -188,3 +187,7 @@ class LoraMesh : public Component {
 };
 
 }  // namespace esphome::lora_mesh
+
+// Included after LoraMesh is fully defined — lora_radio_adapters.h calls
+// LoraMesh::on_radio_packet(), which requires the complete class definition.
+#include "lora_radio_adapters.h"
