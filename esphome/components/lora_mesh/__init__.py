@@ -4,7 +4,7 @@ from esphome import automation
 import esphome.codegen as cg
 from esphome.components import binary_sensor, sensor, text_sensor
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_PAYLOAD
+from esphome.const import CONF_GATEWAY, CONF_ID, CONF_ON_MESSAGE, CONF_PAYLOAD
 from esphome.core import ID
 
 CODEOWNERS = ["@dj-fiorex"]
@@ -14,7 +14,6 @@ MULTI_CONF = False
 CONF_RADIO_ID = "radio_id"
 CONF_NODE_ID = "node_id"
 CONF_MESH_SECRET = "mesh_secret"
-CONF_GATEWAY = "gateway"
 CONF_MAX_HOPS = "max_hops"
 CONF_DISCOVERY_INTERVAL = "discovery_interval"
 CONF_ROUTE_TTL = "route_ttl"
@@ -24,7 +23,6 @@ CONF_SEEN_CACHE_TTL = "seen_cache_ttl"
 CONF_FORWARD_MESSAGES = "forward_messages"
 CONF_DESTINATION = "destination"
 
-CONF_ON_MESSAGE = "on_message"
 CONF_ON_ROUTE_UPDATE = "on_route_update"
 CONF_ON_GATEWAY_CHANGED = "on_gateway_changed"
 
@@ -38,7 +36,7 @@ lora_mesh_ns = cg.esphome_ns.namespace("lora_mesh")
 
 LoraMesh = lora_mesh_ns.class_("LoraMesh", cg.Component)
 LoRaRadio = lora_mesh_ns.class_("LoRaRadio")
-GatewayMode = lora_mesh_ns.enum("GatewayMode")
+GatewayMode = lora_mesh_ns.enum("GatewayMode", is_class=True)
 MeshMessage = lora_mesh_ns.class_("MeshMessage")
 
 # Radio adapter C++ types (conditionally used based on radio_id type)
