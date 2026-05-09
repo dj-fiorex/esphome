@@ -1,0 +1,66 @@
+# common.yaml — lora_mesh component-only config (no bus definitions).
+# The radio component is provided via the test's own includes.
+#
+# Tests:
+#  - Normal node: receives messages, sends unicast and broadcast
+#  - on_message automation
+#  - on_route_update automation
+#  - on_gateway_changed automation
+#  - Actions: lora_mesh.send, lora_mesh.broadcast, lora_mesh.send_to_gateway
+
+lora_mesh:
+  id: mesh
+  radio_id: test_radio
+  node_id: "test-001"
+  mesh_secret: "my_mesh_secret"
+  gateway: normal
+  max_hops: 8
+  discovery_interval: 30s
+  route_ttl: 5min
+  max_routes: 16
+  seen_cache_size: 32
+  seen_cache_ttl: 2min
+  forward_messages: true
+
+  on_message:
+    then:
+      - lambda: |-
+          ESP_LOGI("mesh", "From %s: %s", x.source.c_str(), x.payload.c_str());
+
+  on_route_update:
+    then:
+      - lambda: 'ESP_LOGI("mesh", "Routing table changed, nodes: %zu", id(mesh).get_known_node_count());'
+
+  on_gateway_changed:
+    then:
+      - lambda: 'ESP_LOGI("mesh", "Gateway state changed");'
+
+button:
+  - platform: template
+    name: "Send unicast"
+    on_press:
+      - lora_mesh.send:
+          id: mesh
+          destination: "node-002"
+          payload: "hello"
+
+  - platform: template
+    name: "Broadcast"
+    on_press:
+      - lora_mesh.broadcast:
+          id: mesh
+          payload: "hello all"
+
+  - platform: template
+    name: "Send to gateway"
+    on_press:
+      - lora_mesh.send_to_gateway:
+          id: mesh
+          payload: "sensor_data"
+
+  - platform: template
+    name: "Send lambda payload"
+    on_press:
+      - lora_mesh.send_to_gateway:
+          id: mesh
+          payload: !lambda 'return std::string("value=42");'
