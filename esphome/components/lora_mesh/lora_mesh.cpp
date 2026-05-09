@@ -27,14 +27,6 @@ std::string LoraMesh::id_to_hex(uint32_t id) {
 // ─── Component lifecycle ──────────────────────────────────────────────────────
 
 void LoraMesh::setup() {
-  // If node_id was provided as a lambda, evaluate it now.
-  if (this->node_id_f_) {
-    this->node_id_str_ = this->node_id_f_();
-    if (this->node_id_str_.empty()) {
-      ESP_LOGW(TAG, "node_id lambda returned an empty string — falling back to MAC-derived id");
-    }
-  }
-
   // Derive numeric IDs from strings.
   if (this->node_id_str_.empty()) {
     uint8_t mac[6];

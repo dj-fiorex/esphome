@@ -5,7 +5,8 @@ import esphome.codegen as cg
 from esphome.components import binary_sensor, sensor, text_sensor
 import esphome.config_validation as cv
 from esphome.const import CONF_GATEWAY, CONF_ID, CONF_ON_MESSAGE, CONF_PAYLOAD
-from esphome.core import ID, Lambda
+from esphome.cpp_generator import CallExpression
+from esphome.core import ID
 
 CODEOWNERS = ["@dj-fiorex"]
 MULTI_CONF = False
@@ -181,9 +182,9 @@ async def to_code(config) -> None:
     # ── Configuration setters ─────────────────────────────────────────────
     if CONF_NODE_ID in config:
         node_id_conf = config[CONF_NODE_ID]
-        if isinstance(node_id_conf, Lambda):
-            template_ = await cg.process_lambda(node_id_conf, [], return_type=cg.std_string)
-            cg.add(var.set_node_id_template(template_))
+        if cg.is_template(node_id_conf):
+            lambda_expr = await cg.process_lambda(node_id_conf, [], return_type=cg.std_string)
+            cg.add(var.set_node_id(CallExpression(lambda_expr)))
         else:
             cg.add(var.set_node_id(node_id_conf))
     cg.add(var.set_mesh_secret(config[CONF_MESH_SECRET]))
