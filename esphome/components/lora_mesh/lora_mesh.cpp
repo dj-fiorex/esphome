@@ -18,7 +18,7 @@ static const char *const TAG = "lora_mesh";
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
 
-std::string LoraMesh::id_to_hex_(uint32_t id) {
+std::string LoraMesh::id_to_hex(uint32_t id) {
   char buf[9];
   snprintf(buf, sizeof(buf), "%08" PRIX32, id);
   return {buf};
@@ -155,7 +155,7 @@ bool LoraMesh::has_gateway() const { return this->find_best_gateway_route_() != 
 
 std::string LoraMesh::get_best_gateway() const {
   const RouteEntry *gw = this->find_best_gateway_route_();
-  return (gw != nullptr) ? id_to_hex_(gw->dst_id) : std::string{};
+  return (gw != nullptr) ? id_to_hex(gw->dst_id) : std::string{};
 }
 
 void LoraMesh::clear_routes() {
@@ -193,7 +193,7 @@ std::string LoraMesh::get_routing_table_json() const {
     first = false;
     char buf[96];
     snprintf(buf, sizeof(buf), R"({"dst":"%s","nh":"%s","hops":%u,"gw":%s,"rssi":%.0f})",
-             id_to_hex_(r.dst_id).c_str(), id_to_hex_(r.next_hop_id).c_str(), r.hop_count,
+             id_to_hex(r.dst_id).c_str(), id_to_hex(r.next_hop_id).c_str(), r.hop_count,
              r.is_gateway ? "true" : "false", static_cast<double>(r.rssi));
     out += buf;
   }
@@ -306,9 +306,9 @@ void LoraMesh::process_data_(const std::vector<uint8_t> &pkt, size_t offset, uin
     }
 
     MeshMessage msg;
-    msg.source = id_to_hex_(src_id);
-    msg.destination = id_to_hex_(dst_id);
-    msg.prev_hop = id_to_hex_(prev_hop);
+    msg.source = id_to_hex(src_id);
+    msg.destination = id_to_hex(dst_id);
+    msg.prev_hop = id_to_hex(prev_hop);
     msg.payload.assign(reinterpret_cast<const char *>(pkt.data() + payload_start), payload_len);
     msg.msg_id = msg_id;
     msg.hop_count = hop_count;

@@ -134,7 +134,7 @@ class LoraMesh : public Component {
   void publish_diagnostics_();
 
   // ── Utility ───────────────────────────────────────────────────────────
-  static std::string id_to_hex_(uint32_t id);
+  static std::string id_to_hex(uint32_t id);
   uint32_t next_msg_id_() { return ++this->seq_counter_; }
 
   // ── State ──────────────────────────────────────────────────────────────
