@@ -25,7 +25,7 @@ void LoraMesh::id_to_hex(uint32_t id, char out[9]) { snprintf(out, 9, "%08" PRIX
 void LoraMesh::setup() {
   // Derive numeric IDs from strings.
   if (this->has_node_id_) {
-    this->node_id_str_ = std::move(this->node_id_template_.value());
+    this->node_id_str_ = this->node_id_template_.value();
     this->node_id_ = fnv1a_str(this->node_id_str_);
   } else {
     uint8_t mac[6];
@@ -310,7 +310,8 @@ void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset,
     }
     const RouteEntry *existing = this->find_route_(adv_dst);
     if (existing == nullptr || new_hops < existing->hop_count) {
-      this->update_route_(adv_dst, src_id, new_hops, false, rssi, snr);
+      uint32_t next_hop = src_id;
+      this->update_route_(adv_dst, next_hop, new_hops, false, rssi, snr);
     }
   }
 
@@ -446,8 +447,8 @@ Packet LoraMesh::build_hello_packet_() {
     int clamped = static_cast<int>(r->rssi);
     clamped = (clamped < -128) ? -128 : (clamped > 127) ? 127 : clamped;
     entry[5] = static_cast<uint8_t>(static_cast<int8_t>(clamped));
-    for (size_t j = 0; j < ROUTE_ADV_SIZE; ++j) {
-      pkt.push_back(entry[j]);
+    for (uint8_t b : entry) {
+      pkt.push_back(b);
     }
   }
   return pkt;

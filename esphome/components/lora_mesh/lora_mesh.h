@@ -69,7 +69,7 @@ class LoraMesh : public Component {
   size_t get_known_node_count() const;
 
   // ── Called by the radio adapter when a packet arrives ────────────────
-  void on_radio_packet(const uint8_t *data, size_t len, float rssi, float snr);
+  void on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, float snr);
 
   // ── Callback registrations (used by build_callback_automation) ───────
 
