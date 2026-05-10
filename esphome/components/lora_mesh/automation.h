@@ -57,4 +57,22 @@ template<typename... Ts> class SendToGatewayAction : public Action<Ts...>, publi
   void play(const Ts &...x) override { this->parent_->send_to_gateway(this->payload_.value(x...)); }
 };
 
+/**
+ * lora_mesh.set_connected — notify the mesh whether the upstream connection is up.
+ *
+ * Only effective when `gateway: manual` is configured.  While connected the
+ * node announces itself as a gateway; on disconnect it reverts to a normal node.
+ *
+ * YAML:
+ *   - lora_mesh.set_connected:
+ *       id: mesh
+ *       connected: true
+ */
+template<typename... Ts> class SetConnectedAction : public Action<Ts...>, public Parented<LoraMesh> {
+ public:
+  TEMPLATABLE_VALUE(bool, connected)
+
+  void play(const Ts &...x) override { this->parent_->set_upstream_connected(this->connected_.value(x...)); }
+};
+
 }  // namespace esphome::lora_mesh

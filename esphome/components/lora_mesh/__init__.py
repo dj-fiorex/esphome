@@ -24,6 +24,7 @@ CONF_SEEN_CACHE_SIZE = "seen_cache_size"
 CONF_SEEN_CACHE_TTL = "seen_cache_ttl"
 CONF_FORWARD_MESSAGES = "forward_messages"
 CONF_DESTINATION = "destination"
+CONF_CONNECTED = "connected"
 
 CONF_ON_ROUTE_UPDATE = "on_route_update"
 CONF_ON_GATEWAY_CHANGED = "on_gateway_changed"
@@ -55,11 +56,14 @@ BroadcastMessageAction = lora_mesh_ns.class_(
 SendToGatewayAction = lora_mesh_ns.class_(
     "SendToGatewayAction", automation.Action, cg.Parented.template(LoraMesh)
 )
+SetConnectedAction = lora_mesh_ns.class_(
+    "SetConnectedAction", automation.Action, cg.Parented.template(LoraMesh)
+)
 
 GATEWAY_MODES = {
     "normal": GatewayMode.NORMAL,
     "gateway": GatewayMode.GATEWAY,
-    "auto": GatewayMode.AUTO,
+    "manual": GatewayMode.MANUAL,
 }
 
 # ── Configuration schema ───────────────────────────────────────────────────────
@@ -89,9 +93,7 @@ CONFIG_SCHEMA = cv.All(
                 CONF_ROUTE_TTL, default="5min"
             ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_MAX_ROUTES, default=16): cv.int_range(min=4, max=255),
-            cv.Optional(CONF_SEEN_CACHE_SIZE, default=32): cv.int_range(
-                min=8, max=255
-            ),
+            cv.Optional(CONF_SEEN_CACHE_SIZE, default=32): cv.int_range(min=8, max=255),
             cv.Optional(
                 CONF_SEEN_CACHE_TTL, default="2min"
             ): cv.positive_time_period_milliseconds,
@@ -108,9 +110,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_ROUTING_TABLE_SENSOR_ID): cv.use_id(
                 text_sensor.TextSensor
             ),
-            cv.Optional(CONF_BEST_GATEWAY_SENSOR_ID): cv.use_id(
-                text_sensor.TextSensor
-            ),
+            cv.Optional(CONF_BEST_GATEWAY_SENSOR_ID): cv.use_id(text_sensor.TextSensor),
         }
     ).extend(cv.COMPONENT_SCHEMA)
 )
@@ -164,7 +164,11 @@ async def to_code(config) -> None:
     cg.add(var.set_mesh_secret(config[CONF_MESH_SECRET]))
     cg.add(var.set_gateway_mode(config[CONF_GATEWAY]))
     cg.add(var.set_max_hops(config[CONF_MAX_HOPS]))
-    cg.add(var.set_discovery_interval(int(config[CONF_DISCOVERY_INTERVAL].total_milliseconds)))
+    cg.add(
+        var.set_discovery_interval(
+            int(config[CONF_DISCOVERY_INTERVAL].total_milliseconds)
+        )
+    )
     cg.add(var.set_route_ttl(int(config[CONF_ROUTE_TTL].total_milliseconds)))
     cg.add(var.set_seen_cache_ttl(int(config[CONF_SEEN_CACHE_TTL].total_milliseconds)))
     cg.add(var.set_forward_messages(config[CONF_FORWARD_MESSAGES]))
@@ -273,4 +277,26 @@ async def send_to_gateway_action_to_code(config, action_id, template_arg, args):
     await cg.register_parented(var, config[CONF_ID])
     templ = await cg.templatable(config[CONF_PAYLOAD], args, cg.std_string)
     cg.add(var.set_payload(templ))
+    return var
+
+
+SET_CONNECTED_ACTION_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.use_id(LoraMesh),
+        cv.Required(CONF_CONNECTED): cv.templatable(cv.boolean),
+    }
+)
+
+
+@automation.register_action(
+    "lora_mesh.set_connected",
+    SetConnectedAction,
+    SET_CONNECTED_ACTION_SCHEMA,
+    synchronous=True,
+)
+async def set_connected_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    templ = await cg.templatable(config[CONF_CONNECTED], args, cg.bool_)
+    cg.add(var.set_connected(templ))
     return var

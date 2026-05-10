@@ -138,11 +138,11 @@ struct NameEntry {
 // ───────────────────────────────────────────────────────────────────────────
 
 struct MeshMessage {
-  char source[9]{};                                   // Hex of src_id hash (8 chars + NUL), always present
-  char source_name[MESH_NODE_NAME_MAX_LEN + 1]{};     // Human-readable name, or empty string if unknown
-  char destination[9]{};                              // Human-readable destination
-  char prev_hop[9]{};                                 // Node that sent this to us
-  std::string payload;                         // Application data
+  char source[9]{};                                // Hex of src_id hash (8 chars + NUL), always present
+  char source_name[MESH_NODE_NAME_MAX_LEN + 1]{};  // Human-readable name, or empty string if unknown
+  char destination[9]{};                           // Human-readable destination
+  char prev_hop[9]{};                              // Node that sent this to us
+  std::string payload;                             // Application data
   uint32_t msg_id{0};
   uint8_t hop_count{0};
   uint8_t ttl{0};
@@ -159,7 +159,7 @@ struct MeshMessage {
 enum class GatewayMode : uint8_t {
   NORMAL = 0,   // Never acts as gateway
   GATEWAY = 1,  // Always acts as gateway
-  AUTO = 2,     // Gateway when Wi-Fi/internet is available
+  MANUAL = 2,   // Gateway when set_upstream_connected(true) is called
 };
 
 // ───────────────────────────────────────────────────────────────────────────

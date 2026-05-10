@@ -19,8 +19,7 @@
 7. [YAML Examples](#yaml-examples)
    - [Minimal Node](#minimal-node)
    - [Always-on Gateway](#always-on-gateway)
-   - [Auto-Gateway with Wi-Fi](#auto-gateway-with-wi-fi)
-   - [Full-featured Node with Diagnostics](#full-featured-node-with-diagnostics)
+   - [Manual Gateway (upstream-driven)](#manual-gateway-upstream-driven)   - [Full-featured Node with Diagnostics](#full-featured-node-with-diagnostics)
 8. [MeshMessage Fields](#meshmessage-fields)
 9. [Public C++ API](#public-c-api)
 10. [Protocol Overview](#protocol-overview)
@@ -103,7 +102,6 @@
 |-------------|---------|
 | **Radio component** | Either `sx126x` or `sx127x` must be configured in the same YAML |
 | **Platform** | ESP32 (Arduino and ESP-IDF frameworks) |
-| **Wi-Fi** (optional) | Required only for `gateway: auto` mode |
 
 **Note:** The component does not support ESP8266 or RP2040 due to its dependency on the `sx126x`/`sx127x` radio components.
 
@@ -138,7 +136,7 @@ lora_mesh:
 | `radio_id` | component ID | — | **Required.** Must reference an `sx126x` or `sx127x` component. The type is detected automatically at code-generation time. |
 | `node_id` | templatable string | MAC-derived | Human-readable name for this node. Used as the address when other nodes call `lora_mesh.send`. Supports `!lambda`. If omitted, a 6-character hex string derived from the last 3 bytes of the Wi-Fi MAC is used. |
 | `mesh_secret` | string | — | **Required.** Shared secret for the mesh. FNV-1a hashed to a 32-bit `mesh_id` embedded in every packet. Nodes with a different secret ignore each other's traffic. |
-| `gateway` | enum | `normal` | Controls whether this node announces itself as a gateway. See [Gateway Modes](#gateway-modes). |
+| `gateway` | enum | `normal` | Controls whether this node announces itself as a gateway. See [Gateway Modes](#gateway-modes). Values: `normal`, `gateway`, `manual`. |
 
 ### Routing Options
 
@@ -303,6 +301,26 @@ Send a unicast message to the best known gateway (fewest hops, then highest RSSI
 |-----------|------|-------------|
 | `payload` | templatable string | Application data. Maximum 255 bytes. |
 
+### `lora_mesh.set_connected`
+
+Notify the mesh that the upstream connection is available or has been lost.  Only has effect when `gateway: manual` is configured; the node will announce itself as a gateway while connected and revert to a normal node when disconnected.  Call this from any automation — `wifi.on_connect`, `mqtt.on_connect`, or a custom health-check.
+
+```yaml
+wifi:
+  on_connect:
+    - lora_mesh.set_connected:
+        id: mesh
+        connected: true
+  on_disconnect:
+    - lora_mesh.set_connected:
+        id: mesh
+        connected: false
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `connected` | templatable bool | `true` = upstream is up (node becomes gateway); `false` = upstream is down (node reverts to normal). |
+
 ---
 
 ## YAML Examples
@@ -355,21 +373,30 @@ lora_mesh:
           id(mqtt_client).publish("lora/rx", x.payload);
 ```
 
-### Auto-Gateway with Wi-Fi
+### Manual Gateway (upstream-driven)
 
-This node acts as a gateway only while Wi-Fi is connected:
+This node acts as a gateway only while the upstream connection is available.
+Use `lora_mesh.set_connected` from any automation (Wi-Fi, MQTT, or a custom health-check) to drive the state:
 
 ```yaml
 wifi:
   ssid: "MyNetwork"
   password: "MyPassword"
+  on_connect:
+    - lora_mesh.set_connected:
+        id: mesh
+        connected: true
+  on_disconnect:
+    - lora_mesh.set_connected:
+        id: mesh
+        connected: false
 
 lora_mesh:
   id: mesh
   radio_id: lora_radio
   node_id: "edge-01"
   mesh_secret: "my_secret_key"
-  gateway: auto                 # Gateway when Wi-Fi is up, normal node otherwise
+  gateway: manual               # Gateway when set_upstream_connected(true) is called
 
   on_gateway_changed:
     then:
@@ -503,6 +530,9 @@ std::string get_routing_table_json() const;
 std::string get_node_id() const;        // returns human-readable name
 bool is_gateway() const;               // true if this node is currently a gateway
 
+// Gateway control (only effective with gateway: manual)
+void set_upstream_connected(bool connected);  // drive gateway state from user code
+
 // Maintenance
 void clear_routes();                   // wipe routing table and fire on_route_update
 ```
@@ -580,7 +610,7 @@ Routes are sorted by hop count ascending. The number of routes advertised is lim
 |------|-----------|
 | `normal` (default) | Node never announces itself as a gateway. Cannot be a target for `lora_mesh.send_to_gateway`. |
 | `gateway` | Node always announces itself as a gateway in every HELLO and DATA packet. |
-| `auto` | Node is a gateway **only while Wi-Fi is connected** (uses `wifi::global_wifi_component->is_connected()`). Transitions trigger an immediate HELLO so neighbours learn the new state quickly. Requires the `wifi` component to be configured. Falls back to `normal` behaviour if Wi-Fi component is not compiled in. |
+| `manual` | Node is a gateway **only while** `lora_mesh.set_connected: true` has been called (and `false` has not been called since). What "connected" means is entirely up to the user — it can be Wi-Fi up, MQTT broker reachable, a custom health endpoint, or any other condition. Transitions trigger an immediate HELLO so neighbours learn the new state quickly. |
 
 ---
 
@@ -614,7 +644,7 @@ Routes are sorted by hop count ascending. The number of routes advertised is lim
 
 ### `send_to_gateway` always returns false / "no gateway in routing table"
 
-- Ensure at least one node in the mesh is configured with `gateway: gateway` or `gateway: auto` (with Wi-Fi connected).
+- Ensure at least one node in the mesh is configured with `gateway: gateway` or `gateway: manual` (with `lora_mesh.set_connected: true` called).
 - Wait for HELLO beacons to propagate. Gateway status is learned from HELLO packets.
 - Check `gateway_available_sensor_id` if configured.
 

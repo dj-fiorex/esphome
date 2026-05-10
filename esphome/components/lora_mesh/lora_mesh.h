@@ -37,7 +37,7 @@ class LoraMesh : public Component {
   void setup() override;
   void loop() override;
   void dump_config() override;
-  float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
+  float get_setup_priority() const override { return setup_priority::AFTER_CONNECTION; }
 
   // ── Configuration setters (called from Python codegen) ────────────────
   void set_radio(LoRaRadio *radio) { this->radio_ = radio; }
@@ -62,6 +62,13 @@ class LoraMesh : public Component {
   std::string get_best_gateway() const;
   std::string get_node_id() const { return this->node_id_str_; }
   bool is_gateway() const { return this->acting_as_gateway_; }
+  /**
+   * Notify the mesh that the upstream connection (Wi-Fi, MQTT, internet, …) is
+   * available or has been lost.  Only has effect when `gateway: manual` is
+   * configured; the component then announces itself as a gateway while
+   * connected and reverts to a normal node when disconnected.
+   */
+  void set_upstream_connected(bool connected);
   /** Returns the human-readable name for a node hash, or nullptr if unknown. */
   const char *get_node_name(uint32_t id) const;
   void clear_routes();
@@ -155,6 +162,7 @@ class LoraMesh : public Component {
   std::string mesh_secret_;
   GatewayMode gateway_mode_{GatewayMode::NORMAL};
   bool acting_as_gateway_{false};
+  bool upstream_connected_{false};
   bool last_gateway_available_{false};
   uint8_t max_hops_{8};
   uint32_t discovery_interval_ms_{30000};

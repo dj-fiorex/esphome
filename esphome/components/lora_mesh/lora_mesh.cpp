@@ -3,10 +3,6 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
-#ifdef USE_WIFI
-#include "esphome/components/wifi/wifi_component.h"
-#endif
-
 #include <algorithm>
 #include <cinttypes>
 #include <cstdio>
@@ -73,7 +69,7 @@ void LoraMesh::setup() {
 void LoraMesh::loop() {
   uint32_t now = millis();
 
-  // Update gateway state for AUTO mode.
+  // Update gateway state for MANUAL mode.
   this->update_gateway_state_();
 
   // Periodic HELLO beacon.
@@ -104,7 +100,7 @@ void LoraMesh::dump_config() {
   ESP_LOGCONFIG(TAG, "  Gateway mode: %s",
                 this->gateway_mode_ == GatewayMode::NORMAL    ? "normal"
                 : this->gateway_mode_ == GatewayMode::GATEWAY ? "gateway"
-                                                              : "auto");
+                                                              : "manual");
   ESP_LOGCONFIG(TAG, "  Acting as gateway: %s", this->acting_as_gateway_ ? "yes" : "no");
   ESP_LOGCONFIG(TAG, "  Max hops: %u", this->max_hops_);
   ESP_LOGCONFIG(TAG, "  Discovery interval: %" PRIu32 " ms", this->discovery_interval_ms_);
@@ -677,12 +673,8 @@ bool LoraMesh::compute_gateway_state_() const {
       return false;
     case GatewayMode::GATEWAY:
       return true;
-    case GatewayMode::AUTO:
-#ifdef USE_WIFI
-      return wifi::global_wifi_component != nullptr && wifi::global_wifi_component->is_connected();
-#else
-      return false;
-#endif
+    case GatewayMode::MANUAL:
+      return this->upstream_connected_;
     default:
       return false;
   }
@@ -699,6 +691,14 @@ void LoraMesh::update_gateway_state_() {
   // Immediately send HELLO so neighbours learn the new state quickly.
   auto pkt = this->build_hello_packet_();
   this->transmit_(pkt);
+}
+
+void LoraMesh::set_upstream_connected(bool connected) {
+  if (this->gateway_mode_ != GatewayMode::MANUAL) {
+    return;
+  }
+  this->upstream_connected_ = connected;
+  this->update_gateway_state_();
 }
 
 // ─── Diagnostics ──────────────────────────────────────────────────────────────
