@@ -62,12 +62,14 @@ class LoraMesh : public Component {
   std::string get_best_gateway() const;
   std::string get_node_id() const { return this->node_id_str_; }
   bool is_gateway() const { return this->acting_as_gateway_; }
+  /** Returns the human-readable name for a node hash, or nullptr if unknown. */
+  const char *get_node_name(uint32_t id) const;
   void clear_routes();
   std::string get_routing_table_json() const;
   size_t get_known_node_count() const;
 
   // ── Called by the radio adapter when a packet arrives ────────────────
-  void on_radio_packet(const uint8_t *data, size_t len, float rssi, float snr);
+  void on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, float snr);
 
   // ── Callback registrations (used by build_callback_automation) ───────
 
@@ -128,6 +130,10 @@ class LoraMesh : public Component {
   void mark_seen_(uint32_t src_id, uint32_t msg_id);
   void expire_seen_();
 
+  // ── Node name cache ────────────────────────────────────────────────────
+  void store_node_name_(uint32_t id, const char *name, uint8_t name_len);
+  const char *lookup_node_name_(uint32_t id) const;
+
   // ── Gateway mode ──────────────────────────────────────────────────────
   bool compute_gateway_state_() const;
   void update_gateway_state_();
@@ -164,6 +170,9 @@ class LoraMesh : public Component {
   std::array<RouteEntry, LORA_MESH_MAX_ROUTES> routes_{};
   std::array<SeenEntry, LORA_MESH_SEEN_CACHE_SIZE> seen_cache_{};
   size_t seen_cache_head_{0};
+
+  // Node name cache — same capacity as the routing table, zero heap allocation.
+  std::array<NameEntry, LORA_MESH_MAX_ROUTES> name_map_{};
 
   // ── Callbacks ──────────────────────────────────────────────────────────
   // message_callback_ is likely always registered; use CallbackManager.
