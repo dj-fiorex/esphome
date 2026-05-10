@@ -47,9 +47,6 @@ void LoraMesh::setup() {
   for (auto &n : this->name_map_) {
     n = NameEntry{};
   }
-  // Store our own name so callers can resolve it without needing a HELLO.
-  this->store_node_name_(this->node_id_, this->node_id_str_.c_str(),
-                         static_cast<uint8_t>(std::min(this->node_id_str_.size(), MESH_NODE_NAME_MAX_LEN)));
 
   if (this->radio_ == nullptr) {
     ESP_LOGE(TAG, "No radio configured — marking failed");
@@ -618,9 +615,8 @@ void LoraMesh::store_node_name_(uint32_t id, const char *name, uint8_t name_len)
   }
 
   // Map is full: evict a stale entry whose node is no longer in the routing table.
-  // Never evict our own entry (no route to self exists in the routing table).
   for (auto &e : this->name_map_) {
-    if (e.id != this->node_id_ && this->find_route_(e.id) == nullptr) {
+    if (this->find_route_(e.id) == nullptr) {
       e.id = id;
       snprintf(e.name, sizeof(e.name), "%.*s", static_cast<int>(len), name);
       // is_valid already true
