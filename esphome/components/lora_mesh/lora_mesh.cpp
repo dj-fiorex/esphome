@@ -310,9 +310,13 @@ void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset,
       continue;
     }
     const RouteEntry *existing = this->find_route_(adv_dst);
-    if (existing == nullptr || new_hops < existing->hop_count) {
-      uint32_t next_hop = src_id;
-      this->update_route_(adv_dst, next_hop, new_hops, false, rssi, snr);
+    // Accept a strictly better path from anyone; renew the lease when our
+    // current next hop re-confirms the route at equal quality (ADR 0002) —
+    // otherwise stable multi-hop routes expire and flap every route_ttl.
+    bool better = existing == nullptr || new_hops < existing->hop_count;
+    bool reconfirmed = existing != nullptr && existing->next_hop_id == src_id && new_hops == existing->hop_count;
+    if (better || reconfirmed) {
+      this->update_route_(adv_dst, src_id, new_hops, false, rssi, snr);
     }
   }
 
@@ -596,10 +600,25 @@ void LoraMesh::expire_routes_() {
       ESP_LOGD(TAG, "Route to 0x%08" PRIX32 " expired", r.dst_id);
       r.is_valid = false;
       any = true;
+      // Passive self-healing (ADR 0002): a direct neighbour going silent
+      // invalidates every route relayed through it, so those destinations are
+      // re-learned from other neighbours' HELLOs instead of black-holing.
+      if (r.dst_id == r.next_hop_id) {
+        this->invalidate_routes_via_(r.dst_id);
+      }
     }
   }
   if (any) {
     this->notify_route_changed_();
+  }
+}
+
+void LoraMesh::invalidate_routes_via_(uint32_t neighbor_id) {
+  for (auto &r : this->routes_) {
+    if (r.is_valid && r.next_hop_id == neighbor_id) {
+      ESP_LOGD(TAG, "Route to 0x%08" PRIX32 " invalidated (next hop 0x%08" PRIX32 " lost)", r.dst_id, neighbor_id);
+      r.is_valid = false;
+    }
   }
 }
 
