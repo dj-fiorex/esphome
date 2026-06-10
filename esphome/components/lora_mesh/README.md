@@ -91,9 +91,9 @@
 
 ### Component Lifecycle
 
-1. **`setup()`** — Derives `node_id` (from config or MAC), computes `mesh_id` from `mesh_secret`, initialises routing and seen-cache arrays, registers with the radio adapter. Sends the first HELLO beacon after a random jitter to avoid channel collision when many devices boot simultaneously.
+1. **`setup()`** — Derives `node_id` (from config or MAC), computes the `fabric_id` from `mesh_secret`, initialises routing and seen-cache arrays, registers with the radio adapter. Sends the first HELLO beacon after a random jitter to avoid channel collision when many devices boot simultaneously.
 2. **`loop()`** — Periodically sends HELLO beacons, expires stale routes and seen-cache entries, and publishes diagnostic sensors.
-3. **`on_radio_packet()`** — Called by the radio adapter whenever a packet arrives. Validates mesh ID, suppresses duplicates, then dispatches to `process_hello_()` or `process_data_()`.
+3. **`on_radio_packet()`** — Called by the radio adapter whenever a packet arrives. Validates the fabric ID, suppresses duplicates, then dispatches to `process_hello_()` or `process_data_()`.
 
 ---
 
@@ -137,7 +137,7 @@ lora_mesh:
 |-----|------|---------|-------------|
 | `radio_id` | component ID | — | **Required.** Must reference an `sx126x` or `sx127x` component. The type is detected automatically at code-generation time. |
 | `node_id` | templatable string | MAC-derived | Human-readable name for this node. Used as the address when other nodes call `lora_mesh.send`. Supports `!lambda`. If omitted, a 6-character hex string derived from the last 3 bytes of the Wi-Fi MAC is used. |
-| `mesh_secret` | string | — | **Required.** Shared secret for the mesh. FNV-1a hashed to a 32-bit `mesh_id` embedded in every packet. Nodes with a different secret ignore each other's traffic. |
+| `mesh_secret` | string | — | **Required.** Shared fabric name for the mesh. FNV-1a hashed to a 32-bit `fabric_id` embedded in every packet. Nodes with a different value ignore each other's traffic. It is a relay gate, not a security mechanism (see Limitations). |
 | `gateway` | enum | `normal` | Controls whether this node announces itself as a gateway. See [Gateway Modes](#gateway-modes). |
 
 ### Routing Options
@@ -161,7 +161,7 @@ lora_mesh:
 | `route_ttl` | time | `5min` | > 0 | A route that has not been refreshed within this period is removed. Set longer if nodes beacon infrequently. |
 | `max_routes` | int | `16` | 4–255 | **Compile-time constant** — sets the size of the routing table array. Changing this value requires recompilation. When the table is full, the route with the most hops (or lowest RSSI on tie) is evicted. |
 | `seen_cache_size` | int | `32` | 8–255 | **Compile-time constant** — size of the circular ring buffer used for duplicate suppression. Larger = fewer false duplicates at the cost of RAM. |
-| `seen_cache_ttl` | time | `2min` | > 0 | How long a `(src_id, msg_id)` pair is remembered. Should be at least as long as the longest expected propagation delay across the mesh. |
+| `seen_cache_ttl` | time | `2min` | > 0 | How long a `(src_id, frame_counter)` pair is remembered. Should be at least as long as the longest expected propagation delay across the mesh. |
 | `forward_messages` | bool | `true` | — | When `false`, this node will not relay packets for other nodes. Useful for leaf nodes that should not consume airtime forwarding. |
 
 > **Memory note:** Each `RouteEntry` is 24 bytes; each `SeenEntry` is 12 bytes. A default configuration uses `16 × 24 + 32 × 12 = 768 bytes` of static RAM. Adjust `max_routes` and `seen_cache_size` according to your available memory.
@@ -472,7 +472,7 @@ The `x` variable in `on_message` automations is a `MeshMessage` struct:
 | `x.destination` | `std::string` | Hex string of the destination (`"FFFFFFFF"` for broadcasts). |
 | `x.prev_hop` | `std::string` | Hex string of the node that immediately forwarded this packet to us. |
 | `x.payload` | `std::string` | Application payload (raw bytes as a string). |
-| `x.msg_id` | `uint32_t` | Monotonically increasing sequence number from the source node. |
+| `x.frame_counter` | `uint32_t` | Monotonically increasing sequence number from the source node. |
 | `x.hop_count` | `uint8_t` | Number of hops already traversed when received. `1` = direct neighbour. |
 | `x.ttl` | `uint8_t` | Remaining TTL when received. |
 | `x.rssi` | `float` | RSSI (dBm) of the received signal at this node. |
@@ -525,26 +525,40 @@ on_press:
 
 ## Protocol Overview
 
-### Packet Header (24 bytes, little-endian)
+### Packet Header (28 bytes, little-endian — protocol version 3)
+
+See [docs/wire-format.md](docs/wire-format.md) for the authoritative specification.
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
-| 0 | 4 | `mesh_id` | FNV-1a hash of `mesh_secret`. Packets with a mismatched mesh ID are silently dropped. |
+| 0 | 4 | `fabric_id` | FNV-1a hash of `mesh_secret`. Packets with a mismatched fabric ID are silently dropped (relay gate only). |
 | 4 | 1 | `pkt_type` | `1`=HELLO, `2`=DATA (others reserved for future use) |
 | 5 | 1 | `flags` | Bitmask: `0x01`=IS_GATEWAY, `0x02`=IS_BROADCAST, `0x04`=ACK_REQUESTED, `0x08`=IS_FORWARD |
-| 6 | 4 | `src_id` | FNV-1a hash of the originating node's ID string |
-| 10 | 4 | `dst_id` | FNV-1a hash of destination, or `0xFFFFFFFF` for broadcast |
-| 14 | 4 | `msg_id` | Per-source monotonic counter for duplicate detection |
-| 18 | 1 | `ttl` | Remaining forwarding hops |
-| 19 | 1 | `hop_count` | Hops already taken |
-| 20 | 4 | `prev_hop` | `src_id` of the radio-level sender (updated on each hop) |
+| 6 | 4 | `src_id` | FNV-1a hash of the originating node's ID string (immutable end-to-end) |
+| 10 | 4 | `dst_id` | FNV-1a hash of destination, or `0xFFFFFFFF` for broadcast (immutable end-to-end) |
+| 14 | 4 | `frame_counter` | Per-source monotonic counter for duplicate detection |
+| 18 | 1 | `ttl` | Remaining forwarding hops (decremented per forward) |
+| 19 | 1 | `hop_count` | Hops already taken (incremented per forward) |
+| 20 | 4 | `prev_hop` | `node_id` hash of the radio-level sender (rewritten on each forward) |
+| 24 | 4 | `next_hop` | Intended forwarder; `0xFFFFFFFF` = any (broadcast/flood). Rewritten on each forward. |
 
-### HELLO Payload (after 24-byte header)
+### Forwarding model (single-path unicast)
+
+- **Unicast** DATA is forwarded along a single path: a relay forwards only when it is the
+  designated `next_hop`, then rewrites `next_hop` to its own routing-table next hop toward
+  `dst_id` (see ADR 0002).
+- **Broadcast** DATA is flooded: every node that has not yet seen the packet re-broadcasts
+  it with `next_hop` kept at `0xFFFFFFFF`.
+- **HELLO** is single-hop and never forwarded.
+
+### HELLO Payload (after 28-byte header)
 
 ```
-[0]  proto_version  (1 byte) — always 1
-[1]  route_count    (1 byte) — number of route advertisements that follow
-[2+] route entries  (6 bytes each):
+[0]           proto_version  (1 byte) — always 3
+[1]           name_len       (1 byte) — byte length of node_name, 0 if absent
+[2..2+N-1]    node_name      (N bytes, not NUL-terminated on wire)
+[2+N]         route_count    (1 byte) — number of route advertisements that follow
+[3+N ..]      route entries  (6 bytes each):
      [0..3]  dest_id    (uint32_t LE)
      [4]     hop_count  (uint8_t)
      [5]     rssi_scaled (int8_t, clamped to [-128, 127])
@@ -552,10 +566,10 @@ on_press:
 
 Routes are sorted by hop count ascending. The number of routes advertised is limited by the radio's maximum packet size.
 
-### DATA Payload (after 24-byte header)
+### DATA Payload (after 28-byte header)
 
 ```
-[0]     payload_len  (uint8_t, 0–255)
+[0]     payload_len  (uint8_t)
 [1+]    raw payload bytes
 ```
 
@@ -588,7 +602,7 @@ Routes are sorted by hop count ascending. The number of routes advertised is lim
 
 - **No acknowledgements or retransmission** — packet delivery is best-effort. Implement application-level acknowledgements if reliability is required.
 - **No encryption** — `mesh_secret` provides network isolation (foreign packets are dropped), but it is **not** encrypted. Payloads are transmitted in plaintext. Add encryption at the application layer if needed.
-- **255-byte payload limit** — a single DATA packet can carry at most 255 bytes of payload. For larger data, fragment at the application level.
+- **226-byte payload limit** — a single DATA packet can carry at most 226 bytes of payload (255-byte LoRa frame minus the 28-byte header and length byte); longer payloads are truncated. For larger data, fragment at the application level.
 - **No source routing or on-demand route discovery** — routes must be learnt via HELLO beacons before unicast can succeed. If no route exists, `lora_mesh.send` fails immediately.
 - **No loop prevention beyond TTL** — in a poorly configured mesh with very short `route_ttl` or very long `discovery_interval`, routing loops could temporarily consume airtime. Proper parameter tuning avoids this.
 - **`max_routes` and `seen_cache_size` are compile-time constants** — changing them requires recompilation and reflashing.
@@ -604,7 +618,7 @@ Routes are sorted by hop count ascending. The number of routes advertised is lim
 - Verify all nodes share exactly the same `mesh_secret`.
 - Confirm the `sx126x`/`sx127x` frequency, bandwidth, spreading factor, and coding rate are identical across all devices.
 - Check that `rx_start: true` is set on the radio component so it starts listening immediately.
-- Increase log level to `DEBUG` and watch for `Mesh ID mismatch` messages.
+- Increase log level to `DEBUG` and watch for `Fabric ID mismatch` messages.
 
 ### `send_message` always returns false / "No route to …" in logs
 
@@ -650,7 +664,7 @@ Routes are sorted by hop count ascending. The number of routes advertised is lim
 - Add new `PacketType` values in `lora_packet.h`.
 - Add a corresponding `process_xxx_()` method in `lora_mesh.h`/`lora_mesh.cpp`.
 - Dispatch from `on_radio_packet()` in the `switch` statement.
-- Keep the 24-byte header layout unchanged to remain backward compatible with existing nodes.
+- Header layout changes require bumping `MESH_PROTO_VERSION` and updating `docs/wire-format.md`; nodes skip HELLO bodies from other protocol versions.
 
 ### Debugging packet flow
 
@@ -663,7 +677,7 @@ logger:
 
 Key log tags:
 - `lora_mesh` — all component logs
-- Watch for: `HELLO from`, `DATA from`, `Duplicate from`, `Mesh ID mismatch`, `No route to`, `Forwarded unicast`, `Forwarded broadcast`.
+- Watch for: `HELLO from`, `DATA from`, `Duplicate from`, `Fabric ID mismatch`, `No route to`, `Forwarded unicast`, `Forwarded broadcast`.
 
 ### Inspecting the routing table at runtime
 

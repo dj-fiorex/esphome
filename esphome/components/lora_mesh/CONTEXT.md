@@ -45,5 +45,5 @@ _Avoid_: beacon, advertisement (used loosely; HELLO is the concrete packet).
 A routing-table entry: destination hash, next-hop hash, hop count, RSSI/SNR, gateway flag, expiry. Best route = fewest hops, ties broken by highest RSSI.
 
 **Seen-cache**:
-A fixed ring buffer of `(src_id, msg_id)` pairs used to suppress duplicate processing/forwarding of the same packet.
+A fixed ring buffer of `(src_id, frame_counter)` pairs used to suppress duplicate processing/forwarding of the same packet.
 _Avoid_: dedup table.
