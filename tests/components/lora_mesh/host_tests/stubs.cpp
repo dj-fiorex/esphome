@@ -11,10 +11,12 @@ namespace esphome {
 
 namespace {
 uint32_t g_fake_millis = 1000;
+uint32_t g_fake_random = 0;
 }  // namespace
 
 void test_clock_set(uint32_t ms) { g_fake_millis = ms; }
 void test_clock_advance(uint32_t ms) { g_fake_millis += ms; }
+void test_random_set(uint32_t v) { g_fake_random = v; }
 
 uint32_t millis() { return g_fake_millis; }
 
@@ -31,8 +33,9 @@ void *callback_manager_grow(void *data, uint16_t size, uint16_t &capacity, size_
   return new_data;
 }
 
-// Deterministic: no HELLO jitter in tests.
-uint32_t random_uint32() { return 0; }
+// Deterministic: defaults to 0 (no HELLO stagger, no TX backoff); tests can
+// override via test_random_set().
+uint32_t random_uint32() { return g_fake_random; }
 
 void get_mac_address_raw(uint8_t *mac) {
   static const uint8_t FAKE_MAC[6] = {0x02, 0x00, 0x00, 0xAB, 0xCD, 0xEF};

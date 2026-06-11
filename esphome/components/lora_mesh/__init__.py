@@ -23,6 +23,8 @@ CONF_MAX_ROUTES = "max_routes"
 CONF_SEEN_CACHE_SIZE = "seen_cache_size"
 CONF_SEEN_CACHE_TTL = "seen_cache_ttl"
 CONF_FORWARD_MESSAGES = "forward_messages"
+CONF_TX_JITTER = "tx_jitter"
+CONF_TX_QUEUE_SIZE = "tx_queue_size"
 CONF_DESTINATION = "destination"
 
 CONF_ON_ROUTE_UPDATE = "on_route_update"
@@ -96,6 +98,12 @@ CONFIG_SCHEMA = cv.All(
                 CONF_SEEN_CACHE_TTL, default="2min"
             ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_FORWARD_MESSAGES, default=True): cv.boolean,
+            # TX queue: bounded outgoing queue drained one packet per loop,
+            # with a random pre-send backoff in [0, tx_jitter].
+            cv.Optional(
+                CONF_TX_JITTER, default="100ms"
+            ): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_TX_QUEUE_SIZE, default=8): cv.int_range(min=2, max=32),
             # Automation triggers
             cv.Optional(CONF_ON_MESSAGE): automation.validate_automation({}),
             cv.Optional(CONF_ON_ROUTE_UPDATE): automation.validate_automation({}),
@@ -125,6 +133,7 @@ async def to_code(config) -> None:
     # Compile-time array sizes via preprocessor defines.
     cg.add_define("LORA_MESH_MAX_ROUTES", config[CONF_MAX_ROUTES])
     cg.add_define("LORA_MESH_SEEN_CACHE_SIZE", config[CONF_SEEN_CACHE_SIZE])
+    cg.add_define("LORA_MESH_TX_QUEUE_SIZE", config[CONF_TX_QUEUE_SIZE])
 
     # ── Radio adapter ──────────────────────────────────────────────────────
     radio_var = await cg.get_variable(config[CONF_RADIO_ID])
@@ -168,6 +177,7 @@ async def to_code(config) -> None:
     cg.add(var.set_route_ttl(int(config[CONF_ROUTE_TTL].total_milliseconds)))
     cg.add(var.set_seen_cache_ttl(int(config[CONF_SEEN_CACHE_TTL].total_milliseconds)))
     cg.add(var.set_forward_messages(config[CONF_FORWARD_MESSAGES]))
+    cg.add(var.set_tx_jitter(int(config[CONF_TX_JITTER].total_milliseconds)))
 
     # ── on_message trigger — passes MeshMessage by value as 'x' ──────────
     for conf in config.get(CONF_ON_MESSAGE, []):

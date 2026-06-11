@@ -26,6 +26,7 @@ static void test_broadcast_data_has_v3_header() {
   TestNode a("node-a");
 
   EXPECT_TRUE(a.mesh.broadcast_message("hi"));
+  a.mesh.loop();  // drain the TX queue
 
   EXPECT_EQ(a.radio.sent.size(), 1u);
   const auto &pkt = a.radio.sent[0];
@@ -36,7 +37,7 @@ static void test_broadcast_data_has_v3_header() {
   EXPECT_TRUE(pkt[5] & FLAG_BROADCAST);         // flags
   EXPECT_EQ(get_u32_le(&pkt[6]), NODE_A);       // src_id
   EXPECT_EQ(get_u32_le(&pkt[10]), BROADCAST);   // dst_id
-  EXPECT_EQ(get_u32_le(&pkt[14]), 1u);          // frame_counter (first packet)
+  EXPECT_EQ(get_u32_le(&pkt[14]), 2u);          // frame_counter (frame 1 = initial HELLO)
   EXPECT_EQ(pkt[18], 8);                        // ttl = default max_hops
   EXPECT_EQ(pkt[19], 0);                        // hop_count
   EXPECT_EQ(get_u32_le(&pkt[20]), NODE_A);      // prev_hop = originator
@@ -55,6 +56,7 @@ static void test_oversize_payload_truncated_consistently() {
   std::string big(250, 'x');
 
   EXPECT_TRUE(a.mesh.broadcast_message(big));
+  a.mesh.loop();
 
   EXPECT_EQ(a.radio.sent.size(), 1u);
   const auto &pkt = a.radio.sent[0];
@@ -67,7 +69,8 @@ static void test_oversize_payload_truncated_consistently() {
 static void test_own_hello_has_v3_body_at_offset_28() {
   TestNode a("node-a");
 
-  a.mesh.loop();  // first loop() emits the initial HELLO (jitter stubbed to 0)
+  // The initial HELLO is consumed by the fixture; trigger the next beacon.
+  advance_and_loop(a, 30000);
 
   EXPECT_EQ(a.radio.sent.size(), 1u);
   const auto &pkt = a.radio.sent[0];
@@ -110,6 +113,7 @@ static void test_unicast_send_sets_next_hop_from_routing_table() {
   a.receive(make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 1, -70}}));
 
   EXPECT_TRUE(a.mesh.send_message("node-c", "water me"));
+  a.mesh.loop();
 
   EXPECT_EQ(a.radio.sent.size(), 1u);
   const auto &pkt = a.radio.sent[0];
@@ -160,6 +164,7 @@ static void test_designated_next_hop_forwards_and_rewrites_header() {
 
   // A → C unicast, with B as the designated next hop.
   b.receive(make_data(FABRIC, NODE_A, NODE_C, NODE_B, "water me", 7, 8, 0, NODE_A));
+  b.mesh.loop();
 
   EXPECT_EQ(b.received.size(), 0u);  // not for B, no delivery
   EXPECT_EQ(b.radio.sent.size(), 1u);
@@ -180,6 +185,7 @@ static void test_non_next_hop_relay_does_not_forward_unicast() {
 
   // Same A → C unicast overheard by D, but B is the designated next hop.
   d.receive(make_data(FABRIC, NODE_A, NODE_C, NODE_B, "water me", 7, 8, 0, NODE_A));
+  d.mesh.loop();
 
   EXPECT_EQ(d.received.size(), 0u);
   EXPECT_EQ(d.radio.sent.size(), 0u);  // single-path: only B forwards
@@ -191,6 +197,7 @@ static void test_relay_rebroadcasts_broadcast_and_delivers_it() {
   TestNode b("node-b");
 
   b.receive(make_data(FABRIC, NODE_A, BROADCAST, BROADCAST, "hello all", 3, 8, 0, NODE_A));
+  b.mesh.loop();
 
   // Delivered locally...
   EXPECT_EQ(b.received.size(), 1u);
@@ -219,8 +226,10 @@ static void test_three_node_line_unicast_and_broadcast() {
 
   // Unicast A → C travels the single path through B.
   EXPECT_TRUE(a.mesh.send_message("node-c", "open valve"));
+  a.mesh.loop();
   EXPECT_EQ(a.radio.sent.size(), 1u);
   b.receive(a.radio.sent[0]);  // B is the designated next hop
+  b.mesh.loop();
   EXPECT_EQ(b.radio.sent.size(), 1u);
   c.receive(b.radio.sent[0]);
   EXPECT_EQ(c.received.size(), 1u);
@@ -232,7 +241,9 @@ static void test_three_node_line_unicast_and_broadcast() {
 
   // Broadcast from A reaches both B and C via flooding.
   EXPECT_TRUE(a.mesh.broadcast_message("hello all"));
+  a.mesh.loop();
   b.receive(a.radio.sent[0]);
+  b.mesh.loop();
   EXPECT_EQ(b.received.size(), 1u);
   EXPECT_EQ(b.radio.sent.size(), 1u);  // B re-floods
   c.receive(b.radio.sent[0]);
@@ -293,6 +304,7 @@ static void test_dead_next_hop_invalidates_dependent_routes() {
   EXPECT_TRUE(a.mesh.has_route("node-c"));
   a.radio.sent.clear();
   EXPECT_TRUE(a.mesh.send_message("node-c", "x"));
+  a.mesh.loop();
   EXPECT_EQ(a.radio.sent.size(), 1u);
   EXPECT_EQ(get_u32_le(&a.radio.sent[0][24]), NODE_D);  // recovered via D
 }
@@ -309,8 +321,98 @@ static void test_better_path_still_replaces_worse_route() {
 
   a.radio.sent.clear();
   EXPECT_TRUE(a.mesh.send_message("node-c", "x"));
+  a.mesh.loop();
   EXPECT_EQ(a.radio.sent.size(), 1u);
   EXPECT_EQ(get_u32_le(&a.radio.sent[0][24]), NODE_D);  // next_hop moved to D
+}
+
+// ── Slice 8: bounded TX queue with randomized jitter (issue #12) ────────────
+
+static void test_app_send_is_queued_not_transmitted_inline() {
+  TestNode a("node-a");
+
+  EXPECT_TRUE(a.mesh.broadcast_message("hi"));
+  EXPECT_EQ(a.radio.sent.size(), 0u);  // queued, nothing on air yet
+
+  a.mesh.loop();
+  EXPECT_EQ(a.radio.sent.size(), 1u);  // drained on the next loop
+  EXPECT_EQ(a.radio.sent[0][4], PKT_DATA);
+}
+
+static void test_at_most_one_transmit_per_loop() {
+  TestNode a("node-a");
+
+  EXPECT_TRUE(a.mesh.broadcast_message("one"));
+  EXPECT_TRUE(a.mesh.broadcast_message("two"));
+  EXPECT_TRUE(a.mesh.broadcast_message("three"));
+
+  a.mesh.loop();
+  EXPECT_EQ(a.radio.sent.size(), 1u);
+  a.mesh.loop();
+  EXPECT_EQ(a.radio.sent.size(), 2u);
+  a.mesh.loop();
+  EXPECT_EQ(a.radio.sent.size(), 3u);
+
+  // FIFO order preserved.
+  EXPECT_EQ(a.radio.sent[0][HDR + 1], 'o');
+  EXPECT_EQ(a.radio.sent[1][HDR + 1], 't');
+  EXPECT_EQ(a.radio.sent[2][HDR + 1], 't');
+  EXPECT_EQ(a.radio.sent[2][HDR + 3], 'r');
+}
+
+static void test_forwarding_is_queued_not_inline() {
+  TestNode b("node-b");
+  b.receive(make_hello(FABRIC, NODE_C, "node-c"));
+  b.radio.sent.clear();
+
+  // Unicast forward: nothing may leave the radio from inside on_radio_packet.
+  b.receive(make_data(FABRIC, NODE_A, NODE_C, NODE_B, "x", 7, 8, 0, NODE_A));
+  EXPECT_EQ(b.radio.sent.size(), 0u);
+  b.mesh.loop();
+  EXPECT_EQ(b.radio.sent.size(), 1u);
+
+  // Broadcast re-flood is queued too.
+  b.receive(make_data(FABRIC, NODE_A, BROADCAST, BROADCAST, "y", 8, 8, 0, NODE_A));
+  EXPECT_EQ(b.radio.sent.size(), 1u);
+  b.mesh.loop();
+  EXPECT_EQ(b.radio.sent.size(), 2u);
+}
+
+static void test_randomized_backoff_delays_transmit() {
+  TestNode a("node-a");
+  // Default tx_jitter bound is 100 ms; rng=60 → backoff = 60 % 101 = 60 ms.
+  esphome::test_random_set(60);
+
+  EXPECT_TRUE(a.mesh.broadcast_message("hi"));
+  a.mesh.loop();  // arms the backoff; deadline not reached yet
+  EXPECT_EQ(a.radio.sent.size(), 0u);
+
+  advance_and_loop(a, 59);  // 1 ms early
+  EXPECT_EQ(a.radio.sent.size(), 0u);
+
+  advance_and_loop(a, 1);  // deadline reached
+  EXPECT_EQ(a.radio.sent.size(), 1u);
+}
+
+static void test_full_queue_drops_packet() {
+  TestNode a("node-a");
+
+  // Host tests build with the LORA_MESH_TX_QUEUE_SIZE fallback of 8.
+  for (int i = 0; i < 8; ++i) {
+    EXPECT_TRUE(a.mesh.broadcast_message("p"));
+  }
+  EXPECT_FALSE(a.mesh.broadcast_message("overflow"));  // full → dropped
+
+  // Drain completely: exactly the 8 accepted packets reach the air.
+  for (int i = 0; i < 20; ++i) {
+    a.mesh.loop();
+  }
+  EXPECT_EQ(a.radio.sent.size(), 8u);
+
+  // Queue is usable again after draining.
+  EXPECT_TRUE(a.mesh.broadcast_message("again"));
+  a.mesh.loop();
+  EXPECT_EQ(a.radio.sent.size(), 9u);
 }
 
 int main() {
@@ -329,6 +431,11 @@ int main() {
   RUN_TEST(test_multihop_route_lease_renewed_on_reconfirmation);
   RUN_TEST(test_better_path_still_replaces_worse_route);
   RUN_TEST(test_dead_next_hop_invalidates_dependent_routes);
+  RUN_TEST(test_app_send_is_queued_not_transmitted_inline);
+  RUN_TEST(test_at_most_one_transmit_per_loop);
+  RUN_TEST(test_forwarding_is_queued_not_inline);
+  RUN_TEST(test_randomized_backoff_delays_transmit);
+  RUN_TEST(test_full_queue_drops_packet);
   printf("\n%s (%d failure%s)\n", g_failures == 0 ? "OK" : "FAILED", g_failures, g_failures == 1 ? "" : "s");
   return g_failures == 0 ? 0 : 1;
 }

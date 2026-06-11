@@ -30,6 +30,9 @@ namespace esphome::lora_mesh {
 #ifndef LORA_MESH_SEEN_CACHE_SIZE
 #define LORA_MESH_SEEN_CACHE_SIZE 32  // NOLINT(cppcoreguidelines-macro-usage)
 #endif
+#ifndef LORA_MESH_TX_QUEUE_SIZE
+#define LORA_MESH_TX_QUEUE_SIZE 8  // NOLINT(cppcoreguidelines-macro-usage)
+#endif
 
 class LoraMesh : public Component {
  public:
@@ -52,6 +55,7 @@ class LoraMesh : public Component {
   void set_route_ttl(uint32_t ms) { this->route_ttl_ms_ = ms; }
   void set_seen_cache_ttl(uint32_t ms) { this->seen_cache_ttl_ms_ = ms; }
   void set_forward_messages(bool forward) { this->forward_messages_ = forward; }
+  void set_tx_jitter(uint32_t ms) { this->tx_jitter_ms_ = ms; }
 
   // ── Public API (callable from C++ lambdas / actions) ─────────────────
   bool send_message(const std::string &destination, const std::string &payload);
@@ -106,7 +110,14 @@ class LoraMesh : public Component {
                        uint8_t hop_count, uint32_t prev_hop, uint32_t next_hop) const;
   Packet build_hello_packet_();
   Packet build_data_packet_(uint32_t dst_id, uint32_t next_hop, const std::string &payload);
-  void transmit_(const Packet &pkt);
+
+  // ── Outgoing TX queue (issue #12) ─────────────────────────────────────
+  // All outbound packets are enqueued here and drained at most one per
+  // loop() iteration; the radio does blind blocking TX, so this bounds the
+  // loop stall to one packet's airtime and the pre-send jitter is a
+  // poor-man's CSMA against simultaneous relays.
+  bool enqueue_tx_(const Packet &pkt);
+  void drain_tx_queue_(uint32_t now);
 
   // ── Packet processing ──────────────────────────────────────────────────
   void process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset, uint32_t src_id, bool src_is_gateway,
@@ -174,6 +185,14 @@ class LoraMesh : public Component {
 
   // Node name cache — same capacity as the routing table, zero heap allocation.
   std::array<NameEntry, LORA_MESH_MAX_ROUTES> name_map_{};
+
+  // Outgoing TX ring buffer — fixed capacity, zero heap allocation.
+  std::array<Packet, LORA_MESH_TX_QUEUE_SIZE> tx_queue_{};
+  size_t tx_queue_head_{0};
+  size_t tx_queue_count_{0};
+  uint32_t tx_jitter_ms_{100};    // upper bound for the random pre-send backoff
+  uint32_t tx_next_tx_at_{0};     // millis() deadline of the armed backoff
+  bool tx_backoff_armed_{false};  // backoff sampled for the current head packet
 
   // ── Callbacks ──────────────────────────────────────────────────────────
   // message_callback_ is likely always registered; use CallbackManager.

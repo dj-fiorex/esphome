@@ -92,8 +92,8 @@
 ### Component Lifecycle
 
 1. **`setup()`** — Derives `node_id` (from config or MAC), computes the `fabric_id` from `mesh_secret`, initialises routing and seen-cache arrays, registers with the radio adapter. Sends the first HELLO beacon after a random jitter to avoid channel collision when many devices boot simultaneously.
-2. **`loop()`** — Periodically sends HELLO beacons, expires stale routes and seen-cache entries, and publishes diagnostic sensors.
-3. **`on_radio_packet()`** — Called by the radio adapter whenever a packet arrives. Validates the fabric ID, suppresses duplicates, then dispatches to `process_hello_()` or `process_data_()`.
+2. **`loop()`** — Periodically queues HELLO beacons, expires stale routes and seen-cache entries, publishes diagnostic sensors, and transmits **at most one** queued packet per iteration after a random `tx_jitter` backoff. This bounds the main-loop stall to one packet's airtime (the radio TX is blocking).
+3. **`on_radio_packet()`** — Called by the radio adapter whenever a packet arrives. Validates the fabric ID, suppresses duplicates, then dispatches to `process_hello_()` or `process_data_()`. Packets to forward are enqueued on the TX queue, never transmitted from inside the callback.
 
 ---
 
@@ -152,6 +152,8 @@ lora_mesh:
   seen_cache_size: 32           # Compile-time duplicate-suppression cache size (8–255)
   seen_cache_ttl: 2min          # How long a seen-packet entry is remembered
   forward_messages: true        # Whether to relay packets on behalf of other nodes
+  tx_jitter: 100ms              # Upper bound of the random pre-send backoff
+  tx_queue_size: 8              # Compile-time outgoing TX queue capacity (2–32)
 ```
 
 | Key | Type | Default | Range | Description |
@@ -163,8 +165,10 @@ lora_mesh:
 | `seen_cache_size` | int | `32` | 8–255 | **Compile-time constant** — size of the circular ring buffer used for duplicate suppression. Larger = fewer false duplicates at the cost of RAM. |
 | `seen_cache_ttl` | time | `2min` | > 0 | How long a `(src_id, frame_counter)` pair is remembered. Should be at least as long as the longest expected propagation delay across the mesh. |
 | `forward_messages` | bool | `true` | — | When `false`, this node will not relay packets for other nodes. Useful for leaf nodes that should not consume airtime forwarding. |
+| `tx_jitter` | time | `100ms` | ≥ 0 | Upper bound of the random backoff applied before each transmission. De-synchronises relays that queued the same packet simultaneously (poor-man's CSMA — the radios do blind blocking TX with no carrier-sense). `0ms` disables the backoff. |
+| `tx_queue_size` | int | `8` | 2–32 | **Compile-time constant** — capacity of the outgoing TX queue. All outbound packets (HELLO, app sends, forwards) are queued and drained at most one per `loop()` iteration. When full, new packets are dropped with a warning log. |
 
-> **Memory note:** Each `RouteEntry` is 24 bytes; each `SeenEntry` is 12 bytes. A default configuration uses `16 × 24 + 32 × 12 = 768 bytes` of static RAM. Adjust `max_routes` and `seen_cache_size` according to your available memory.
+> **Memory note:** Each `RouteEntry` is 24 bytes; each `SeenEntry` is 12 bytes. A default configuration uses `16 × 24 + 32 × 12 = 768 bytes` of static RAM. The TX queue reserves `tx_queue_size × ~264 bytes` (≈ 2.1 KB at the default 8). Adjust `max_routes`, `seen_cache_size` and `tx_queue_size` according to your available memory.
 
 ### Diagnostic Sensors
 

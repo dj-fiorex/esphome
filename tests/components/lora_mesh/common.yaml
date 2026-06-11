@@ -21,6 +21,8 @@ lora_mesh:
   seen_cache_size: 32
   seen_cache_ttl: 2min
   forward_messages: true
+  tx_jitter: 100ms
+  tx_queue_size: 8
 
   on_message:
     then:
