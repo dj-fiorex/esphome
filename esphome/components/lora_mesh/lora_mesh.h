@@ -102,18 +102,18 @@ class LoraMesh : public Component {
 
  protected:
   // ── Packet building ────────────────────────────────────────────────────
-  Packet build_header_(PacketType type, uint8_t flags, uint32_t dst_id, uint32_t msg_id, uint8_t ttl, uint8_t hop_count,
-                       uint32_t prev_hop) const;
+  Packet build_header_(PacketType type, uint8_t flags, uint32_t dst_id, uint32_t frame_counter, uint8_t ttl,
+                       uint8_t hop_count, uint32_t prev_hop, uint32_t next_hop) const;
   Packet build_hello_packet_();
-  Packet build_data_packet_(uint32_t dst_id, const std::string &payload);
+  Packet build_data_packet_(uint32_t dst_id, uint32_t next_hop, const std::string &payload);
   void transmit_(const Packet &pkt);
 
   // ── Packet processing ──────────────────────────────────────────────────
   void process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset, uint32_t src_id, bool src_is_gateway,
                       uint32_t prev_hop, float rssi, float snr);
   void process_data_(const uint8_t *pkt, size_t pkt_len, size_t offset, uint32_t src_id, uint32_t dst_id,
-                     uint32_t msg_id, uint8_t ttl, uint8_t hop_count, uint32_t prev_hop, uint8_t flags, float rssi,
-                     float snr);
+                     uint32_t frame_counter, uint8_t ttl, uint8_t hop_count, uint32_t prev_hop, uint32_t next_hop,
+                     uint8_t flags, float rssi, float snr);
 
   // ── Routing helpers ────────────────────────────────────────────────────
   RouteEntry *find_route_(uint32_t dst_id);
@@ -123,11 +123,12 @@ class LoraMesh : public Component {
   void update_route_(uint32_t dst_id, uint32_t next_hop, uint8_t hops, bool is_gw, float rssi, float snr);
   RouteEntry *alloc_route_slot_();
   void expire_routes_();
+  void invalidate_routes_via_(uint32_t neighbor_id);
   void notify_route_changed_();
 
   // ── Duplicate suppression ──────────────────────────────────────────────
-  bool is_duplicate_(uint32_t src_id, uint32_t msg_id);
-  void mark_seen_(uint32_t src_id, uint32_t msg_id);
+  bool is_duplicate_(uint32_t src_id, uint32_t frame_counter);
+  void mark_seen_(uint32_t src_id, uint32_t frame_counter);
   void expire_seen_();
 
   // ── Node name cache ────────────────────────────────────────────────────
@@ -143,12 +144,12 @@ class LoraMesh : public Component {
 
   // ── Utility ───────────────────────────────────────────────────────────
   static void id_to_hex(uint32_t id, char out[9]);
-  uint32_t next_msg_id_() { return ++this->seq_counter_; }
+  uint32_t next_frame_counter_() { return ++this->frame_counter_; }
 
   // ── State ──────────────────────────────────────────────────────────────
   LoRaRadio *radio_{nullptr};
   uint32_t node_id_{0};
-  uint32_t mesh_id_{0};
+  uint32_t fabric_id_{0};
   std::string node_id_str_;
   TemplatableValue<std::string> node_id_template_;
   bool has_node_id_{false};
@@ -161,7 +162,7 @@ class LoraMesh : public Component {
   uint32_t route_ttl_ms_{300000};
   uint32_t seen_cache_ttl_ms_{120000};
   bool forward_messages_{true};
-  uint32_t seq_counter_{0};
+  uint32_t frame_counter_{0};
   uint32_t last_hello_{0};
   uint32_t last_expire_check_{0};
   uint32_t last_diag_publish_{0};

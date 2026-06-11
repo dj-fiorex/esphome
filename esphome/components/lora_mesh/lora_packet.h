@@ -16,8 +16,8 @@ using Packet = StaticVector<uint8_t, LORA_MAX_PACKET_SIZE>;
 // Protocol constants
 // ───────────────────────────────────────────────────────────────────────────
 
-/** Wire protocol version carried in every HELLO body (bumped when body layout changes). */
-static constexpr uint8_t MESH_PROTO_VERSION = 2;
+/** Wire protocol version carried in every HELLO body (bumped when the wire format changes). */
+static constexpr uint8_t MESH_PROTO_VERSION = 3;
 
 /** Maximum length of the human-readable node name carried in HELLO packets. */
 static constexpr size_t MESH_NODE_NAME_MAX_LEN = 32;
@@ -25,23 +25,35 @@ static constexpr size_t MESH_NODE_NAME_MAX_LEN = 32;
 /** Broadcast destination: every node in the mesh processes the packet. */
 static constexpr uint32_t MESH_BROADCAST_ID = 0xFFFFFFFF;
 
-/** Minimum packet size = fixed 24-byte header. */
-static constexpr size_t MESH_HEADER_SIZE = 24;
+/** Minimum packet size = fixed 28-byte header. */
+static constexpr size_t MESH_HEADER_SIZE = 28;
 
 // ───────────────────────────────────────────────────────────────────────────
-// Header byte offsets (all fields are little-endian)
+// Header byte offsets (all fields are little-endian) — docs/wire-format.md §2
 // ───────────────────────────────────────────────────────────────────────────
 //
-//  0  [4]  mesh_id     – FNV-1a(mesh_secret), never the raw secret
-//  4  [1]  pkt_type    – see PacketType enum
-//  5  [1]  flags       – see PacketFlags
-//  6  [4]  src_id      – FNV-1a(node_id string) or FNV-1a(MAC bytes)
-// 10  [4]  dst_id      – 0xFFFFFFFF = broadcast
-// 14  [4]  msg_id      – per-source monotonic counter (wraps at 2^32)
-// 18  [1]  ttl         – remaining forwarding hops, decremented on each hop
-// 19  [1]  hop_count   – hops already traversed
-// 20  [4]  prev_hop    – node_id of the radio-level sender
-// ── total 24 bytes ──
+//  0  [4]  fabric_id      – FNV-1a of the (non-secret) fabric name; relay gate only
+//  4  [1]  pkt_type       – see PacketType enum
+//  5  [1]  flags          – see PacketFlags
+//  6  [4]  src_id         – FNV-1a(node_id string) or FNV-1a(MAC bytes), immutable end-to-end
+// 10  [4]  dst_id         – 0xFFFFFFFF = broadcast, immutable end-to-end
+// 14  [4]  frame_counter  – per-source monotonic counter (wraps at 2^32)
+// 18  [1]  ttl            – remaining forwarding hops, decremented on each hop
+// 19  [1]  hop_count      – hops already traversed
+// 20  [4]  prev_hop       – node_id of the radio-level sender, rewritten on each forward
+// 24  [4]  next_hop       – intended forwarder; 0xFFFFFFFF = any (broadcast/flood)
+// ── total 28 bytes ──
+
+static constexpr size_t MESH_OFF_FABRIC_ID = 0;
+static constexpr size_t MESH_OFF_PKT_TYPE = 4;
+static constexpr size_t MESH_OFF_FLAGS = 5;
+static constexpr size_t MESH_OFF_SRC_ID = 6;
+static constexpr size_t MESH_OFF_DST_ID = 10;
+static constexpr size_t MESH_OFF_FRAME_COUNTER = 14;
+static constexpr size_t MESH_OFF_TTL = 18;
+static constexpr size_t MESH_OFF_HOP_COUNT = 19;
+static constexpr size_t MESH_OFF_PREV_HOP = 20;
+static constexpr size_t MESH_OFF_NEXT_HOP = 24;
 
 // ───────────────────────────────────────────────────────────────────────────
 // Packet types
@@ -66,7 +78,7 @@ static constexpr uint8_t FLAG_ACK_REQUESTED = 0x04;
 static constexpr uint8_t FLAG_IS_FORWARD = 0x08;  // This is a forwarded packet
 
 // ───────────────────────────────────────────────────────────────────────────
-// HELLO payload (after the 24-byte header)
+// HELLO payload (after the 28-byte header)
 //
 //   [0]                   proto_version  (1 byte)  — must equal MESH_PROTO_VERSION
 //   [1]                   name_len       (1 byte)  — byte length of node_name, 0 if absent
@@ -87,7 +99,7 @@ static constexpr size_t HELLO_FIXED_SIZE = 2;
 static constexpr size_t ROUTE_ADV_SIZE = 6;
 
 // ───────────────────────────────────────────────────────────────────────────
-// DATA payload (after the 24-byte header)
+// DATA payload (after the 28-byte header)
 //
 //   [0]     payload_len  (uint8_t)
 //   [1+]    raw payload bytes (up to payload_len)
@@ -118,7 +130,7 @@ struct RouteEntry {
 
 struct SeenEntry {
   uint32_t src_id{0};
-  uint32_t msg_id{0};
+  uint32_t frame_counter{0};
   uint32_t expires_at{0};  // millis() deadline
 };
 
@@ -138,12 +150,12 @@ struct NameEntry {
 // ───────────────────────────────────────────────────────────────────────────
 
 struct MeshMessage {
-  char source[9]{};                                   // Hex of src_id hash (8 chars + NUL), always present
-  char source_name[MESH_NODE_NAME_MAX_LEN + 1]{};     // Human-readable name, or empty string if unknown
-  char destination[9]{};                              // Human-readable destination
-  char prev_hop[9]{};                                 // Node that sent this to us
-  std::string payload;                         // Application data
-  uint32_t msg_id{0};
+  char source[9]{};                                // Hex of src_id hash (8 chars + NUL), always present
+  char source_name[MESH_NODE_NAME_MAX_LEN + 1]{};  // Human-readable name, or empty string if unknown
+  char destination[9]{};                           // Human-readable destination
+  char prev_hop[9]{};                              // Node that sent this to us
+  std::string payload;                             // Application data
+  uint32_t frame_counter{0};
   uint8_t hop_count{0};
   uint8_t ttl{0};
   float rssi{0.0f};
