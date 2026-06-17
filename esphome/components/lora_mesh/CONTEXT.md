@@ -47,3 +47,7 @@ A routing-table entry: destination hash, next-hop hash, hop count, RSSI/SNR, gat
 **Seen-cache**:
 A fixed ring buffer of `(src_id, frame_counter)` pairs used to suppress duplicate processing/forwarding of the same packet.
 _Avoid_: dedup table.
+
+**TX queue**:
+The bounded outgoing packet queue. Every outbound packet (HELLO, app send, Forward) is enqueued, never transmitted inline; `loop()` drains at most one packet per iteration after a random **TX jitter** backoff (`0..tx_jitter`). Poor-man's CSMA for radios that do blind blocking TX; overflow drops the new packet with a log. Natural future home for CAD/listen-before-talk.
+_Avoid_: send buffer, outbox.

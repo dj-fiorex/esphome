@@ -18,6 +18,7 @@
 namespace esphome {
 void test_clock_set(uint32_t ms);
 void test_clock_advance(uint32_t ms);
+void test_random_set(uint32_t v);
 }  // namespace esphome
 
 // ── Assertions ──────────────────────────────────────────────────────────────
@@ -49,6 +50,7 @@ extern int g_failures;
   do { \
     int before_ = g_failures; \
     esphome::test_clock_set(1000); \
+    esphome::test_random_set(0); \
     fn(); \
     printf("%s %s\n", g_failures == before_ ? "PASS" : "FAIL", #fn); \
   } while (0)
@@ -87,7 +89,10 @@ struct TestNode {
     this->mesh.add_on_message_callback(
         [this](const esphome::lora_mesh::MeshMessage &msg) { this->received.push_back(msg); });
     this->mesh.setup();
-    this->radio.sent.clear();  // discard anything emitted during setup
+    // The first loop() emits the initial HELLO (frame_counter 1, jitter
+    // stubbed to 0); consume it so tests start with an empty TX queue.
+    this->mesh.loop();
+    this->radio.sent.clear();
   }
 
   void receive(const std::vector<uint8_t> &pkt, float rssi = -60.0f, float snr = 8.0f) {
