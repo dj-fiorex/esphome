@@ -223,6 +223,60 @@ std::string LoraMesh::get_routing_table_json() const {
   return out;
 }
 
+#ifdef LORA_MESH_LINK_SIM
+// ─── Link simulator (debug/test only — see ADR-0004) ──────────────────────────
+
+void LoraMesh::add_blocked_neighbor(const std::string &name) {
+  if (name.empty()) {
+    return;
+  }
+  uint32_t id = fnv1a_str(name);
+  for (size_t i = 0; i < this->blocked_count_; i++) {
+    if (this->blocked_neighbors_[i] == id) {
+      return;  // already blocked
+    }
+  }
+  if (this->blocked_count_ >= this->blocked_neighbors_.size()) {
+    ESP_LOGW(TAG, "link-sim: blocklist full (%zu), ignoring '%s'", this->blocked_neighbors_.size(), name.c_str());
+    return;
+  }
+  this->blocked_neighbors_[this->blocked_count_++] = id;
+  ESP_LOGI(TAG, "link-sim: blocking neighbour '%s' (0x%08" PRIX32 ")", name.c_str(), id);
+}
+
+void LoraMesh::clear_blocked_neighbors() {
+  this->blocked_count_ = 0;
+  ESP_LOGI(TAG, "link-sim: blocklist cleared");
+}
+
+bool LoraMesh::is_link_blocked_(uint32_t prev_hop) const {
+  for (size_t i = 0; i < this->blocked_count_; i++) {
+    if (this->blocked_neighbors_[i] == prev_hop) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string LoraMesh::get_blocked_neighbors_str() const {
+  std::string out;
+  for (size_t i = 0; i < this->blocked_count_; i++) {
+    if (i != 0) {
+      out += ", ";
+    }
+    const char *name = this->lookup_node_name_(this->blocked_neighbors_[i]);
+    if (name != nullptr) {
+      out += name;
+    } else {
+      char hex[9];
+      id_to_hex(this->blocked_neighbors_[i], hex);
+      out += hex;
+    }
+  }
+  return out;
+}
+#endif  // LORA_MESH_LINK_SIM
+
 // ─── Radio packet dispatcher ──────────────────────────────────────────────────
 
 void LoraMesh::on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, float snr) {
@@ -248,6 +302,16 @@ void LoraMesh::on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, f
   uint8_t hop_count = h[MESH_OFF_HOP_COUNT];
   uint32_t prev_hop = get_u32_le(h + MESH_OFF_PREV_HOP);
   uint32_t next_hop = get_u32_le(h + MESH_OFF_NEXT_HOP);
+
+#ifdef LORA_MESH_LINK_SIM
+  // Link simulator: pretend this packet was never received because its
+  // immediate sender is "out of range". Dropped before duplicate/seen handling
+  // so the blocked neighbour leaves no trace at all. See ADR-0004.
+  if (this->is_link_blocked_(prev_hop)) {
+    ESP_LOGD(TAG, "link-sim: dropped packet from prev_hop 0x%08" PRIX32 " (blocked)", prev_hop);
+    return;
+  }
+#endif
 
   // Ignore our own transmissions echoed back.
   if (src_id == this->node_id_) {
@@ -620,9 +684,16 @@ void LoraMesh::update_route_(uint32_t dst_id, uint32_t next_hop, uint8_t hops, b
   if (!r->is_valid || hops < r->hop_count || (hops == r->hop_count && rssi > r->rssi) || r->next_hop_id != next_hop) {
     r->next_hop_id = next_hop;
     r->hop_count = hops;
-    r->is_gateway = is_gw;
     r->rssi = rssi;
     r->snr = snr;
+    changed = true;
+  }
+  // A node's gateway status can change independently of its path metric (e.g. it
+  // becomes a gateway after we first learned it as a plain neighbour). Refresh the
+  // flag on every confirmation, otherwise a stale is_gateway=false hides a gateway
+  // that re-advertises at equal quality and send_to_gateway() finds no route.
+  if (r->is_gateway != is_gw) {
+    r->is_gateway = is_gw;
     changed = true;
   }
   r->is_valid = true;

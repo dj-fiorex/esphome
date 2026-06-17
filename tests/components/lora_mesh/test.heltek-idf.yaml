@@ -1,0 +1,338 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# lora_mesh — three-board real-hardware test (Heltec WiFi LoRa 32 V3)
+#
+# Flash this SAME file to all three boards. Each board gets a unique identity
+# automatically: node_id = App.get_name(), which with name_add_mac_suffix is
+# "lora-mesh-test-<mac>". Everything is observable and controllable from the
+# per-board web UI (port 80) and mirrored on the on-board OLED.
+#
+# Forcing a multi-hop chain on a bench (where all radios hear each other):
+#   link_sim is enabled. Read each board's "My node id" from its web UI, then
+#   on board A type C's node id into "Block neighbor", and on board C type A's
+#   id. Now A and C cannot hear each other directly and must route via B.
+#   Confirm A's "Mesh routing table" shows C with "hops":2, and watch the
+#   gateway board's "Last message" feed. Clear the blocks (or block B) live to
+#   exercise passive self-healing. See docs/adr/0004-link-sim-debug-filter.md.
+# ─────────────────────────────────────────────────────────────────────────────
+
+substitutions:
+  device_name: "lora-mesh-test"
+  friendly_name: "Lora Mesh Test"
+  device_description: "lora_mesh three-board mesh test on Heltec ESP32 LoRa V3."
+  mesh_secret: "my_mesh_secret"
+
+esphome:
+  name: ${device_name}
+  comment: ${device_description}
+  friendly_name: ${friendly_name}
+  min_version: 2024.11.0
+  name_add_mac_suffix: true
+
+esp32:
+  board: heltec_wifi_lora_32_V3
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+  hardware_uart: UART0
+
+captive_portal:
+
+web_server:
+  port: 80
+
+wifi:
+  id: wifi_connection
+  ssid: bambu
+  password: "1234567890"
+  ap:
+    ssid: "lora-mesh-fallback"
+    password: "12345678"
+  on_connect:
+    then:
+      - logger.log:
+          format: "WIFI: CONNECTED"
+          level: INFO
+  on_disconnect:
+    then:
+      - logger.log:
+          format: "WIFI: DISCONNECTED"
+          level: WARN
+
+# Allow Over-The-Air updates (unique device names → unique OTA targets)
+ota:
+  - platform: esphome
+
+# Vext (GPIO36) gates power to the on-board OLED — must come up before display
+# init, hence the very high setup_priority.
+switch:
+  - platform: gpio
+    id: vext
+    setup_priority: 1001
+    pin: 36
+    restore_mode: always_off
+
+  - platform: template
+    name: "Auto traffic"
+    id: auto_traffic
+    optimistic: true
+    restore_mode: ALWAYS_ON
+
+# On-board OLED I2C bus
+i2c:
+  - sda: GPIO17
+    scl: GPIO18
+    frequency: 400kHz
+    id: bus_display
+
+# SPI bus for the LoRa radio
+spi:
+  clk_pin: GPIO9
+  mosi_pin: GPIO10
+  miso_pin: GPIO11
+
+# LoRa radio
+sx126x:
+  id: lora_radio
+  dio1_pin: GPIO14
+  cs_pin: GPIO8
+  busy_pin: GPIO13
+  rst_pin: GPIO12
+  pa_power: 3
+  bandwidth: 125_0kHz
+  crc_enable: true
+  frequency: 433920000
+  modulation: LORA
+  rx_start: true
+  hw_version: sx1262
+  rf_switch: true
+  sync_value: [0x14, 0x24]
+  preamble_size: 8
+  spreading_factor: 7
+  coding_rate: CR_4_6
+  tcxo_voltage: 1_8V
+  tcxo_delay: 5ms
+  on_packet:
+    - lambda: |-
+        ESP_LOGD("lora", "RX RSSI: %.2f dBm, SNR: %.2f dB, Data: %s",
+                 rssi, snr, format_hex(x).c_str());
+
+# Monotonic sequence counter for verifiable automated traffic.
+globals:
+  - id: tx_seq
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+
+# ── The component under test ─────────────────────────────────────────────────
+lora_mesh:
+  id: mesh
+  radio_id: lora_radio
+  node_id: !lambda "return App.get_name();"
+  mesh_secret: "${mesh_secret}"
+  gateway: normal
+  link_sim: true
+  # Test-tuned timings: fast convergence + prompt expiry so multi-hop and
+  # self-healing are observable in tens of seconds (production defaults are
+  # 30s / 5min / 2min).
+  discovery_interval: 10s
+  route_ttl: 40s
+  seen_cache_ttl: 1min
+  # Diagnostic sensors (declared below) — the component publishes to these.
+  node_count_sensor_id: mesh_node_count
+  gateway_available_sensor_id: mesh_gateway_available
+  routing_table_sensor_id: mesh_routing_table
+  best_gateway_sensor_id: mesh_best_gateway
+
+  on_message:
+    then:
+      - lambda: |-
+          ESP_LOGI("mesh", "MSG from %s (%s) hops=%u: %s",
+                   x.source, x.source_name, x.hop_count, x.payload.c_str());
+          char buf[96];
+          snprintf(buf, sizeof(buf), "%s h%u: %s",
+                   x.source_name[0] ? x.source_name : x.source, x.hop_count,
+                   x.payload.c_str());
+          id(last_message).publish_state(buf);
+      - rtttl.play: "rx:d=16,o=6,b=200:c"
+
+  on_route_update:
+    then:
+      - lambda: 'ESP_LOGI("mesh", "Routes changed, known nodes: %zu", id(mesh).get_known_node_count());'
+
+  on_gateway_changed:
+    then:
+      - lambda: 'ESP_LOGI("mesh", "Gateway availability changed");'
+
+# ── Diagnostics (published by the component) ─────────────────────────────────
+sensor:
+  - platform: template
+    name: "Mesh node count"
+    id: mesh_node_count
+    accuracy_decimals: 0
+    icon: "mdi:lan"
+
+binary_sensor:
+  - platform: template
+    name: "Mesh gateway available"
+    id: mesh_gateway_available
+    icon: "mdi:lan-connect"
+
+text_sensor:
+  - platform: template
+    name: "Mesh routing table"
+    id: mesh_routing_table
+    icon: "mdi:table-network"
+
+  - platform: template
+    name: "Mesh best gateway"
+    id: mesh_best_gateway
+    icon: "mdi:router-network"
+
+  # Test-only diagnostics driven by lambdas / on_message.
+  - platform: template
+    name: "My node id"
+    id: my_node_id
+    update_interval: 10s
+    lambda: "return id(mesh).get_node_id();"
+
+  - platform: template
+    name: "Blocked neighbors"
+    id: blocked_neighbors
+    update_interval: 5s
+    lambda: "return id(mesh).get_blocked_neighbors_str();"
+
+  - platform: template
+    name: "Last message"
+    id: last_message
+
+# ── Runtime controls (web UI) ────────────────────────────────────────────────
+select:
+  - platform: template
+    name: "Gateway mode"
+    id: gateway_mode_select
+    optimistic: true
+    initial_option: "normal"
+    options:
+      - "normal"
+      - "gateway"
+      - "auto"
+    set_action:
+      - lambda: |-
+          if (x == "gateway") {
+            id(mesh).set_gateway_mode(esphome::lora_mesh::GatewayMode::GATEWAY);
+          } else if (x == "auto") {
+            id(mesh).set_gateway_mode(esphome::lora_mesh::GatewayMode::AUTO);
+          } else {
+            id(mesh).set_gateway_mode(esphome::lora_mesh::GatewayMode::NORMAL);
+          }
+
+text:
+  - platform: template
+    name: "Block neighbor (name)"
+    id: block_neighbor_input
+    optimistic: true
+    mode: text
+    set_action:
+      - lambda: |-
+          if (!x.empty()) {
+            id(mesh).add_blocked_neighbor(x);
+          }
+
+  - platform: template
+    name: "Unicast destination"
+    id: unicast_dest
+    optimistic: true
+    mode: text
+
+button:
+  - platform: template
+    name: "Clear link-sim blocks"
+    on_press:
+      - lambda: "id(mesh).clear_blocked_neighbors();"
+
+  - platform: template
+    name: "Send unicast"
+    on_press:
+      - lora_mesh.send:
+          id: mesh
+          destination: !lambda "return id(unicast_dest).state;"
+          payload: !lambda 'return std::string("unicast from ") + id(mesh).get_node_id();'
+
+  - platform: template
+    name: "Broadcast"
+    on_press:
+      - lora_mesh.broadcast:
+          id: mesh
+          payload: !lambda 'return std::string("bcast from ") + id(mesh).get_node_id();'
+
+  - platform: template
+    name: "Send to gateway"
+    on_press:
+      - lora_mesh.send_to_gateway:
+          id: mesh
+          payload: !lambda 'return std::string("manual gw from ") + id(mesh).get_node_id();'
+
+# ── Automated, pausable traffic generators ───────────────────────────────────
+interval:
+  # Convergecast: each node periodically reports a sequence number to the
+  # gateway. On the gateway, "Last message" shows a rolling feed from every
+  # node with its hop count — instant proof multi-hop delivery works.
+  - interval: 15s
+    then:
+      - if:
+          condition:
+            and:
+              - switch.is_on: auto_traffic
+              # A gateway is the convergecast sink, not a source — sending to a
+              # gateway from a node that is itself a gateway is meaningless.
+              - lambda: "return !id(mesh).is_gateway();"
+          then:
+            - lora_mesh.send_to_gateway:
+                id: mesh
+                payload: !lambda |-
+                  id(tx_seq) += 1;
+                  return id(mesh).get_node_id() + " seq=" + std::to_string(id(tx_seq));
+
+  # Periodic flood to exercise the broadcast path and duplicate suppression.
+  - interval: 30s
+    then:
+      - if:
+          condition:
+            switch.is_on: auto_traffic
+          then:
+            - lora_mesh.broadcast:
+                id: mesh
+                payload: !lambda 'return std::string("bcast ") + id(mesh).get_node_id();'
+
+# ── On-board OLED: mesh state at a glance ────────────────────────────────────
+font:
+  - file: "gfonts://Roboto"
+    id: roboto
+    size: 10
+
+display:
+  - platform: ssd1306_i2c
+    id: my_display
+    model: "SSD1306 128x64"
+    reset_pin: GPIO21
+    address: 0x3C
+    i2c_id: bus_display
+    pages:
+      - id: page_mesh
+        lambda: |-
+          it.printf(0, 0, id(roboto), "%s", id(mesh).get_node_id().c_str());
+          it.printf(0, 12, id(roboto), "Nodes: %zu", id(mesh).get_known_node_count());
+          it.printf(0, 24, id(roboto), "GW reach: %s", id(mesh).has_gateway() ? "yes" : "no");
+          it.printf(0, 36, id(roboto), "Self GW: %s", id(mesh).is_gateway() ? "yes" : "no");
+          it.printf(0, 48, id(roboto), "%s", id(last_message).state.c_str());
+
+# Buzzer — short audible cue on message receive (handy when handling boards).
+output:
+  - platform: ledc
+    pin: GPIO6
+    id: buzzer_output
+
+rtttl:
+  output: buzzer_output

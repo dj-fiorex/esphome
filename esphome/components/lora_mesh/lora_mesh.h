@@ -72,6 +72,20 @@ class LoraMesh : public Component {
   std::string get_routing_table_json() const;
   size_t get_known_node_count() const;
 
+#ifdef LORA_MESH_LINK_SIM
+  // ── Link simulator (debug/test only — see ADR-0004) ──────────────────
+  // Emulates "out of radio range" by dropping packets whose immediate sender
+  // (prev_hop) is on a runtime-configurable blocklist. Lets a chain topology
+  // (A↔B↔C with A and C unable to hear each other) be forced and reshaped
+  // from the web UI without physically separating boards.
+  /** Add a neighbour (by node_id string) whose direct transmissions are dropped. */
+  void add_blocked_neighbor(const std::string &name);
+  /** Clear the link-sim blocklist (restore full connectivity). */
+  void clear_blocked_neighbors();
+  /** Comma-separated list of currently blocked neighbours (name if known, else hex). */
+  std::string get_blocked_neighbors_str() const;
+#endif
+
   // ── Called by the radio adapter when a packet arrives ────────────────
   void on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, float snr);
 
@@ -142,6 +156,12 @@ class LoraMesh : public Component {
   void mark_seen_(uint32_t src_id, uint32_t frame_counter);
   void expire_seen_();
 
+#ifdef LORA_MESH_LINK_SIM
+  // ── Link simulator (debug/test only) ──────────────────────────────────
+  /** True if prev_hop is on the blocklist (packet should be dropped as unheard). */
+  bool is_link_blocked_(uint32_t prev_hop) const;
+#endif
+
   // ── Node name cache ────────────────────────────────────────────────────
   void store_node_name_(uint32_t id, const char *name, uint8_t name_len);
   const char *lookup_node_name_(uint32_t id) const;
@@ -182,6 +202,13 @@ class LoraMesh : public Component {
   std::array<RouteEntry, LORA_MESH_MAX_ROUTES> routes_{};
   std::array<SeenEntry, LORA_MESH_SEEN_CACHE_SIZE> seen_cache_{};
   size_t seen_cache_head_{0};
+
+#ifdef LORA_MESH_LINK_SIM
+  // Link-sim blocklist of immediate-sender (prev_hop) hashes; small fixed
+  // capacity, zero heap allocation. Compiled out unless link_sim is enabled.
+  std::array<uint32_t, 4> blocked_neighbors_{};
+  size_t blocked_count_{0};
+#endif
 
   // Node name cache — same capacity as the routing table, zero heap allocation.
   std::array<NameEntry, LORA_MESH_MAX_ROUTES> name_map_{};

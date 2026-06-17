@@ -25,6 +25,7 @@ CONF_SEEN_CACHE_TTL = "seen_cache_ttl"
 CONF_FORWARD_MESSAGES = "forward_messages"
 CONF_TX_JITTER = "tx_jitter"
 CONF_TX_QUEUE_SIZE = "tx_queue_size"
+CONF_LINK_SIM = "link_sim"
 CONF_DESTINATION = "destination"
 
 CONF_ON_ROUTE_UPDATE = "on_route_update"
@@ -91,9 +92,7 @@ CONFIG_SCHEMA = cv.All(
                 CONF_ROUTE_TTL, default="5min"
             ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_MAX_ROUTES, default=16): cv.int_range(min=4, max=255),
-            cv.Optional(CONF_SEEN_CACHE_SIZE, default=32): cv.int_range(
-                min=8, max=255
-            ),
+            cv.Optional(CONF_SEEN_CACHE_SIZE, default=32): cv.int_range(min=8, max=255),
             cv.Optional(
                 CONF_SEEN_CACHE_TTL, default="2min"
             ): cv.positive_time_period_milliseconds,
@@ -104,6 +103,11 @@ CONFIG_SCHEMA = cv.All(
                 CONF_TX_JITTER, default="100ms"
             ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_TX_QUEUE_SIZE, default=8): cv.int_range(min=2, max=32),
+            # Link simulator (debug/test only): when enabled, the node can be
+            # told at runtime to drop packets whose immediate sender (prev_hop)
+            # is on a blocklist, emulating "out of radio range" without moving
+            # hardware. Compiled out entirely when false. See ADR-0004.
+            cv.Optional(CONF_LINK_SIM, default=False): cv.boolean,
             # Automation triggers
             cv.Optional(CONF_ON_MESSAGE): automation.validate_automation({}),
             cv.Optional(CONF_ON_ROUTE_UPDATE): automation.validate_automation({}),
@@ -116,9 +120,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_ROUTING_TABLE_SENSOR_ID): cv.use_id(
                 text_sensor.TextSensor
             ),
-            cv.Optional(CONF_BEST_GATEWAY_SENSOR_ID): cv.use_id(
-                text_sensor.TextSensor
-            ),
+            cv.Optional(CONF_BEST_GATEWAY_SENSOR_ID): cv.use_id(text_sensor.TextSensor),
         }
     ).extend(cv.COMPONENT_SCHEMA)
 )
@@ -134,6 +136,11 @@ async def to_code(config) -> None:
     cg.add_define("LORA_MESH_MAX_ROUTES", config[CONF_MAX_ROUTES])
     cg.add_define("LORA_MESH_SEEN_CACHE_SIZE", config[CONF_SEEN_CACHE_SIZE])
     cg.add_define("LORA_MESH_TX_QUEUE_SIZE", config[CONF_TX_QUEUE_SIZE])
+
+    # Link simulator is an opt-in, debug-only feature (see ADR-0004); compile it
+    # out completely unless explicitly enabled.
+    if config[CONF_LINK_SIM]:
+        cg.add_define("LORA_MESH_LINK_SIM")
 
     # ── Radio adapter ──────────────────────────────────────────────────────
     radio_var = await cg.get_variable(config[CONF_RADIO_ID])
@@ -173,7 +180,11 @@ async def to_code(config) -> None:
     cg.add(var.set_mesh_secret(config[CONF_MESH_SECRET]))
     cg.add(var.set_gateway_mode(config[CONF_GATEWAY]))
     cg.add(var.set_max_hops(config[CONF_MAX_HOPS]))
-    cg.add(var.set_discovery_interval(int(config[CONF_DISCOVERY_INTERVAL].total_milliseconds)))
+    cg.add(
+        var.set_discovery_interval(
+            int(config[CONF_DISCOVERY_INTERVAL].total_milliseconds)
+        )
+    )
     cg.add(var.set_route_ttl(int(config[CONF_ROUTE_TTL].total_milliseconds)))
     cg.add(var.set_seen_cache_ttl(int(config[CONF_SEEN_CACHE_TTL].total_milliseconds)))
     cg.add(var.set_forward_messages(config[CONF_FORWARD_MESSAGES]))
