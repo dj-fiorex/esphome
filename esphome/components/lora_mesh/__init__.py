@@ -189,19 +189,7 @@ async def to_code(config) -> None:
         cg.add(var.set_node_id(node_id_templ))
     cg.add(var.set_mesh_secret(config[CONF_MESH_SECRET]))
     if CONF_GROUP_KEY in config:
-        # Convert hex string to bytes array for the C++ setter.
-        key_hex = config[CONF_GROUP_KEY]
-        key_bytes = [int(key_hex[i : i + 2], 16) for i in range(0, 32, 2)]
-        arr = cg.RawExpression(
-            "std::array<uint8_t, 16>{{"
-            + ", ".join(f"0x{b:02x}" for b in key_bytes)
-            + "}}"
-        )
-        cg.add(
-            cg.RawStatement(
-                f"{var}->set_group_key({arr}.data(), 16)"
-            )
-        )
+        cg.add(var.set_group_key_hex(config[CONF_GROUP_KEY]))
     cg.add(var.set_gateway_mode(config[CONF_GATEWAY]))
     cg.add(var.set_max_hops(config[CONF_MAX_HOPS]))
     cg.add(
