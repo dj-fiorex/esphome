@@ -57,4 +57,19 @@ template<typename... Ts> class SendToGatewayAction : public Action<Ts...>, publi
   void play(const Ts &...x) override { this->parent_->send_to_gateway(this->payload_.value(x...)); }
 };
 
+/**
+ * lora_mesh.set_group_key — provision the per-Group encryption key.
+ *
+ * YAML:
+ *   - lora_mesh.set_group_key:
+ *       id: mesh
+ *       key: "0123456789abcdef0123456789abcdef"
+ */
+template<typename... Ts> class SetGroupKeyAction : public Action<Ts...>, public Parented<LoraMesh> {
+ public:
+  TEMPLATABLE_VALUE(std::string, key)
+
+  void play(const Ts &...x) override { this->parent_->set_group_key_hex(this->key_.value(x...)); }
+};
+
 }  // namespace esphome::lora_mesh

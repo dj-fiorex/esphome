@@ -47,6 +47,13 @@ void LoraMesh::setup() {
   for (auto &n : this->name_map_) {
     n = NameEntry{};
   }
+  for (auto &rc : this->replay_counters_) {
+    rc = ReplayEntry{};
+  }
+
+  // Load persisted group key and frame counter from NVS.
+  this->load_group_key_();
+  this->load_frame_counter_();
 
   if (this->radio_ == nullptr) {
     ESP_LOGE(TAG, "No radio configured — marking failed");
@@ -66,8 +73,9 @@ void LoraMesh::setup() {
   uint32_t jitter_ms = static_cast<uint32_t>(random_uint32() % (this->discovery_interval_ms_ / 5));
   this->last_hello_ = millis() - this->discovery_interval_ms_ + jitter_ms;
 
-  ESP_LOGI(TAG, "LoraMesh setup: node_id=%s (0x%08" PRIX32 ") fabric_id=0x%08" PRIX32 " gw=%s",
-           this->node_id_str_.c_str(), this->node_id_, this->fabric_id_, this->acting_as_gateway_ ? "yes" : "no");
+  ESP_LOGI(TAG, "LoraMesh setup: node_id=%s (0x%08" PRIX32 ") fabric_id=0x%08" PRIX32 " gw=%s provisioned=%s",
+           this->node_id_str_.c_str(), this->node_id_, this->fabric_id_, this->acting_as_gateway_ ? "yes" : "no",
+           this->has_group_key_ ? "yes" : "no");
 }
 
 void LoraMesh::loop() {
@@ -410,34 +418,62 @@ void LoraMesh::process_data_(const uint8_t *pkt, size_t pkt_len, size_t offset, 
   bool is_for_us = is_broadcast || (dst_id == this->node_id_);
 
   if (is_for_us) {
-    if (pkt_len < offset + 1) {
-      return;
-    }
-    uint8_t payload_len = pkt[offset];
-    size_t payload_start = offset + 1;
-    if (pkt_len < payload_start + payload_len) {
-      return;
-    }
+    // Only attempt decryption if we hold a group key (provisioned).
+    if (!this->has_group_key_) {
+      ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " dropped (unprovisioned)", src_id);
+      // Fall through to forwarding below (unprovisioned relays still forward).
+    } else {
+      if (pkt_len < offset + 1) {
+        return;
+      }
+      uint8_t payload_len = pkt[offset];
+      size_t payload_start = offset + 1;
+      // Encrypted DATA body: payload_len bytes of ciphertext + 4-byte MIC.
+      if (pkt_len < payload_start + payload_len + MIC_SIZE) {
+        return;
+      }
 
-    MeshMessage msg;
-    id_to_hex(src_id, msg.source);
-    const char *src_name = this->lookup_node_name_(src_id);
-    if (src_name != nullptr) {
-      snprintf(msg.source_name, sizeof(msg.source_name), "%s", src_name);
-    }
-    id_to_hex(dst_id, msg.destination);
-    id_to_hex(prev_hop, msg.prev_hop);
-    msg.payload.assign(reinterpret_cast<const char *>(pkt + payload_start), payload_len);
-    msg.frame_counter = frame_counter;
-    msg.hop_count = hop_count;
-    msg.ttl = ttl;
-    msg.rssi = rssi;
-    msg.snr = snr;
-    msg.is_broadcast = is_broadcast;
-    msg.is_for_this_node = !is_broadcast;
+      const uint8_t *ciphertext = pkt + payload_start;
+      const uint8_t *mic = pkt + payload_start + payload_len;
 
-    ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " hops=%u len=%u", src_id, hop_count, payload_len);
-    this->message_callback_(msg);
+      // Decrypt and verify MIC.
+      uint8_t plaintext[226];  // max payload
+      bool mic_ok = mesh_decrypt_payload(this->group_key_, src_id, dst_id, frame_counter,
+                                         static_cast<uint8_t>(PacketType::DATA), payload_len, ciphertext, plaintext,
+                                         mic);
+      if (!mic_ok) {
+        ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " MIC failed (not our group), dropped", src_id);
+        // MIC fail → not our group. Still forward if applicable.
+      } else {
+        // MIC passed. Now check replay (verify MIC first, then reject replay).
+        if (this->is_replay_(src_id, frame_counter)) {
+          ESP_LOGW(TAG, "DATA from 0x%08" PRIX32 " frame=%" PRIu32 " replay rejected", src_id, frame_counter);
+          // Replay → do not deliver, do not forward.
+          return;
+        }
+        this->update_replay_counter_(src_id, frame_counter);
+
+        MeshMessage msg;
+        id_to_hex(src_id, msg.source);
+        const char *src_name = this->lookup_node_name_(src_id);
+        if (src_name != nullptr) {
+          snprintf(msg.source_name, sizeof(msg.source_name), "%s", src_name);
+        }
+        id_to_hex(dst_id, msg.destination);
+        id_to_hex(prev_hop, msg.prev_hop);
+        msg.payload.assign(reinterpret_cast<const char *>(plaintext), payload_len);
+        msg.frame_counter = frame_counter;
+        msg.hop_count = hop_count;
+        msg.ttl = ttl;
+        msg.rssi = rssi;
+        msg.snr = snr;
+        msg.is_broadcast = is_broadcast;
+        msg.is_for_this_node = !is_broadcast;
+
+        ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " hops=%u len=%u", src_id, hop_count, payload_len);
+        this->message_callback_(msg);
+      }
+    }
   }
 
   // Forward if TTL allows, forwarding is enabled, and packet is not unicast-only-to-us.
@@ -460,6 +496,7 @@ void LoraMesh::process_data_(const uint8_t *pkt, size_t pkt_len, size_t offset, 
 
   // Packet forwarding: copy the incoming packet into a stack-allocated Packet,
   // then patch the TTL, hop_count, prev_hop and next_hop fields before retransmitting.
+  // Header + encrypted body are forwarded verbatim (relay does not need the key).
   Packet fwd(pkt, pkt + pkt_len);
   fwd[MESH_OFF_TTL] = ttl - 1;
   fwd[MESH_OFF_HOP_COUNT] = hop_count + 1;
@@ -552,17 +589,36 @@ Packet LoraMesh::build_data_packet_(uint32_t dst_id, uint32_t next_hop, const st
   if (dst_id == MESH_BROADCAST_ID) {
     flags |= FLAG_IS_BROADCAST;
   }
-  auto pkt = this->build_header_(PacketType::DATA, flags, dst_id, this->next_frame_counter_(), this->max_hops_, 0,
+  uint32_t fc = this->next_frame_counter_();
+  auto pkt = this->build_header_(PacketType::DATA, flags, dst_id, fc, this->max_hops_, 0,
                                  this->node_id_, next_hop);
-  // Budget = radio frame limit minus header and the payload_len byte.
+  // Budget = radio frame limit minus header, payload_len byte, and MIC.
   size_t max_pkt = (this->radio_ != nullptr) ? this->radio_->get_max_packet_size() : LORA_MAX_PACKET_SIZE;
   max_pkt = std::min(max_pkt, LORA_MAX_PACKET_SIZE);
-  size_t len = std::min(payload.size(), max_pkt - MESH_HEADER_SIZE - 1);
+  size_t len = std::min(payload.size(), max_pkt - MESH_HEADER_SIZE - 1 - MIC_SIZE);
   pkt.push_back(static_cast<uint8_t>(len));
-  // StaticVector has no range-append; push_back on uint8_t is optimised to a byte-copy
-  // loop by the compiler, which is equivalent to memcpy for trivially-copyable elements.
-  for (size_t i = 0; i < len; ++i) {
-    pkt.push_back(static_cast<uint8_t>(payload[i]));
+
+  if (this->has_group_key_) {
+    // Encrypt payload and append ciphertext + MIC.
+    uint8_t ciphertext[226];
+    uint8_t mic[MIC_SIZE];
+    mesh_encrypt_payload(this->group_key_, this->node_id_, dst_id, fc, static_cast<uint8_t>(PacketType::DATA),
+                         static_cast<uint8_t>(len), reinterpret_cast<const uint8_t *>(payload.data()), ciphertext, mic);
+    for (size_t i = 0; i < len; ++i) {
+      pkt.push_back(ciphertext[i]);
+    }
+    for (size_t i = 0; i < MIC_SIZE; ++i) {
+      pkt.push_back(mic[i]);
+    }
+  } else {
+    // Unprovisioned: send plaintext (no security — for bootstrapping/debug only).
+    for (size_t i = 0; i < len; ++i) {
+      pkt.push_back(static_cast<uint8_t>(payload[i]));
+    }
+    // Still append a zero MIC so the wire format is consistent.
+    for (size_t i = 0; i < MIC_SIZE; ++i) {
+      pkt.push_back(0);
+    }
   }
   return pkt;
 }
@@ -869,6 +925,153 @@ void LoraMesh::publish_diagnostics_() {
     this->best_gateway_sensor_->publish_state(this->get_best_gateway());
   }
 #endif
+}
+
+// ─── Group key management ─────────────────────────────────────────────────────
+
+void LoraMesh::set_group_key(const uint8_t *key, size_t len) {
+  if (key == nullptr || len == 0) {
+    this->has_group_key_ = false;
+    memset(this->group_key_, 0, GROUP_KEY_SIZE);
+    ESP_LOGI(TAG, "Group key cleared (unprovisioned)");
+  } else {
+    memcpy(this->group_key_, key, std::min(len, GROUP_KEY_SIZE));
+    if (len < GROUP_KEY_SIZE) {
+      memset(this->group_key_ + len, 0, GROUP_KEY_SIZE - len);
+    }
+    this->has_group_key_ = true;
+    ESP_LOGI(TAG, "Group key set (provisioned)");
+  }
+  this->persist_group_key_();
+}
+
+void LoraMesh::set_group_key_hex(const std::string &hex_key) {
+  if (hex_key.empty()) {
+    this->set_group_key(nullptr, 0);
+    return;
+  }
+  if (hex_key.size() != GROUP_KEY_SIZE * 2) {
+    ESP_LOGW(TAG, "set_group_key_hex: expected 32 hex chars, got %zu", hex_key.size());
+    return;
+  }
+  uint8_t key[GROUP_KEY_SIZE];
+  for (size_t i = 0; i < GROUP_KEY_SIZE; i++) {
+    char hi = hex_key[i * 2];
+    char lo = hex_key[i * 2 + 1];
+    auto hex_val = [](char c) -> uint8_t {
+      if (c >= '0' && c <= '9') return static_cast<uint8_t>(c - '0');
+      if (c >= 'a' && c <= 'f') return static_cast<uint8_t>(c - 'a' + 10);
+      if (c >= 'A' && c <= 'F') return static_cast<uint8_t>(c - 'A' + 10);
+      return 0;
+    };
+    key[i] = static_cast<uint8_t>((hex_val(hi) << 4) | hex_val(lo));
+  }
+  this->set_group_key(key, GROUP_KEY_SIZE);
+}
+
+// ─── Frame counter persistence ────────────────────────────────────────────────
+
+uint32_t LoraMesh::next_frame_counter_() {
+  ++this->frame_counter_;
+  // Persist to NVS when we exceed the batch threshold.
+  if (this->frame_counter_ >= this->frame_counter_persist_threshold_) {
+    this->persist_frame_counter_();
+  }
+  return this->frame_counter_;
+}
+
+void LoraMesh::persist_frame_counter_() {
+  // Write ahead by FRAME_COUNTER_BATCH so on next boot we resume from a safe value.
+  uint32_t persisted_val = this->frame_counter_ + FRAME_COUNTER_BATCH;
+  this->frame_counter_pref_.save(&persisted_val);
+  this->frame_counter_persist_threshold_ = persisted_val;
+  ESP_LOGD(TAG, "Frame counter persisted (next_boot=%" PRIu32 ")", persisted_val);
+}
+
+void LoraMesh::load_frame_counter_() {
+  uint32_t hash = fnv1a_str("lora_mesh_fc_" + this->node_id_str_);
+  this->frame_counter_pref_ = global_preferences->make_preference<uint32_t>(hash, true);
+
+  uint32_t stored = 0;
+  if (this->frame_counter_pref_.load(&stored) && stored > 0) {
+    // Resume from the persisted-ahead value (guarantees no nonce reuse).
+    this->frame_counter_ = stored;
+    ESP_LOGI(TAG, "Frame counter loaded from NVS: %" PRIu32, stored);
+  } else {
+    this->frame_counter_ = 0;
+  }
+  // Set threshold so next persist happens after FRAME_COUNTER_BATCH more frames.
+  this->frame_counter_persist_threshold_ = this->frame_counter_ + FRAME_COUNTER_BATCH;
+  // Persist immediately so if we crash before the first batch completes,
+  // next boot still has a safe-ahead value.
+  this->persist_frame_counter_();
+}
+
+void LoraMesh::persist_group_key_() {
+  uint32_t hash = fnv1a_str("lora_mesh_gk_" + this->node_id_str_);
+  this->group_key_pref_ = global_preferences->make_preference<uint8_t[GROUP_KEY_SIZE + 1]>(hash, true);
+
+  // Store: 1-byte flag (has_key) + 16-byte key.
+  uint8_t buf[GROUP_KEY_SIZE + 1];
+  buf[0] = this->has_group_key_ ? 1 : 0;
+  memcpy(buf + 1, this->group_key_, GROUP_KEY_SIZE);
+  this->group_key_pref_.save(&buf);
+}
+
+void LoraMesh::load_group_key_() {
+  uint32_t hash = fnv1a_str("lora_mesh_gk_" + this->node_id_str_);
+  this->group_key_pref_ = global_preferences->make_preference<uint8_t[GROUP_KEY_SIZE + 1]>(hash, true);
+
+  uint8_t buf[GROUP_KEY_SIZE + 1];
+  if (this->group_key_pref_.load(&buf) && buf[0] == 1) {
+    memcpy(this->group_key_, buf + 1, GROUP_KEY_SIZE);
+    this->has_group_key_ = true;
+    ESP_LOGI(TAG, "Group key loaded from NVS (provisioned)");
+  } else {
+    this->has_group_key_ = false;
+    memset(this->group_key_, 0, GROUP_KEY_SIZE);
+  }
+}
+
+// ─── Replay protection ────────────────────────────────────────────────────────
+
+bool LoraMesh::is_replay_(uint32_t src_id, uint32_t frame_counter) {
+  for (const auto &entry : this->replay_counters_) {
+    if (entry.is_valid && entry.src_id == src_id) {
+      return frame_counter <= entry.high_water;
+    }
+  }
+  return false;  // Unknown source — not a replay.
+}
+
+void LoraMesh::update_replay_counter_(uint32_t src_id, uint32_t frame_counter) {
+  // Update existing entry.
+  for (auto &entry : this->replay_counters_) {
+    if (entry.is_valid && entry.src_id == src_id) {
+      if (frame_counter > entry.high_water) {
+        entry.high_water = frame_counter;
+      }
+      return;
+    }
+  }
+  // Allocate new slot.
+  for (auto &entry : this->replay_counters_) {
+    if (!entry.is_valid) {
+      entry.src_id = src_id;
+      entry.high_water = frame_counter;
+      entry.is_valid = true;
+      return;
+    }
+  }
+  // Table full: evict oldest (lowest high_water).
+  ReplayEntry *oldest = &this->replay_counters_[0];
+  for (auto &entry : this->replay_counters_) {
+    if (entry.high_water < oldest->high_water) {
+      oldest = &entry;
+    }
+  }
+  oldest->src_id = src_id;
+  oldest->high_water = frame_counter;
 }
 
 }  // namespace esphome::lora_mesh

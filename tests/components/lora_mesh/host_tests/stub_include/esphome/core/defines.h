@@ -5,3 +5,4 @@
 // every feature) via -I ordering, so the component builds with no optional
 // integrations (sensors, wifi, radio adapters) on the host.
 #define USE_HOST
+#define LORA_MESH_HOST_TEST
