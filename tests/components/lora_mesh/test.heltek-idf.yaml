@@ -131,6 +131,7 @@ lora_mesh:
   radio_id: lora_radio
   node_id: !lambda "return App.get_name();"
   mesh_secret: "${mesh_secret}"
+  group_key: "0123456789abcdef0123456789abcdef"
   gateway: normal
   link_sim: true
   # Test-tuned timings: fast convergence + prompt expiry so multi-hop and
@@ -266,6 +267,13 @@ button:
       - lora_mesh.broadcast:
           id: mesh
           payload: !lambda 'return std::string("bcast from ") + id(mesh).get_node_id();'
+
+  - platform: template
+    name: "Provision group key"
+    on_press:
+      - lora_mesh.set_group_key:
+          id: mesh
+          key: "abcdef0123456789abcdef0123456789"
 
   - platform: template
     name: "Send to gateway"
