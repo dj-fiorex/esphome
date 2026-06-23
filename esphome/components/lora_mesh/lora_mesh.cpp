@@ -56,7 +56,20 @@ void LoraMesh::setup() {
   }
 
   // Load persisted group key and frame counter from NVS.
+  // If codegen already set a key (before setup, when node_id_str_ was empty and
+  // persist wrote under the wrong hash), save it so we can fall back to it.
+  bool had_codegen_key = this->has_group_key_;
+  uint8_t codegen_key[GROUP_KEY_SIZE];
+  if (had_codegen_key) {
+    memcpy(codegen_key, this->group_key_, GROUP_KEY_SIZE);
+  }
   this->load_group_key_();
+  // If NVS had nothing but codegen provided a key, apply it and persist properly.
+  if (!this->has_group_key_ && had_codegen_key) {
+    memcpy(this->group_key_, codegen_key, GROUP_KEY_SIZE);
+    this->has_group_key_ = true;
+    this->persist_group_key_();
+  }
   this->load_frame_counter_();
 
   if (this->radio_ == nullptr) {
@@ -1012,6 +1025,9 @@ void LoraMesh::load_frame_counter_() {
 }
 
 void LoraMesh::persist_group_key_() {
+  // Before setup(), node_id_str_ is empty — skip persist (setup will persist properly).
+  if (this->node_id_str_.empty())
+    return;
   uint32_t hash = fnv1a_str(std::string(NVS_PREFIX_GROUP_KEY) + this->node_id_str_);
   this->group_key_pref_ = global_preferences->make_preference<uint8_t[GROUP_KEY_SIZE + 1]>(hash, true);
 
