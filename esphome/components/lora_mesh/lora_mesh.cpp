@@ -1026,8 +1026,9 @@ void LoraMesh::load_frame_counter_() {
 
 void LoraMesh::persist_group_key_() {
   // Before setup(), node_id_str_ is empty — skip persist (setup will persist properly).
-  if (this->node_id_str_.empty())
+  if (this->node_id_str_.empty()) {
     return;
+  }
   uint32_t hash = fnv1a_str(std::string(NVS_PREFIX_GROUP_KEY) + this->node_id_str_);
   this->group_key_pref_ = global_preferences->make_preference<uint8_t[GROUP_KEY_SIZE + 1]>(hash, true);
 
