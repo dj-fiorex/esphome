@@ -16,6 +16,10 @@ namespace esphome::lora_mesh {
 
 static const char *const TAG = "lora_mesh";
 
+// NVS key prefixes for preference hashes.
+static const char *const NVS_PREFIX_FRAME_COUNTER = "lora_mesh_fc_";
+static const char *const NVS_PREFIX_GROUP_KEY = "lora_mesh_gk_";
+
 // ─── Utility ──────────────────────────────────────────────────────────────────
 
 void LoraMesh::id_to_hex(uint32_t id, char out[9]) { snprintf(out, 9, "%08" PRIX32, id); }
@@ -989,7 +993,7 @@ void LoraMesh::persist_frame_counter_() {
 }
 
 void LoraMesh::load_frame_counter_() {
-  uint32_t hash = fnv1a_str("lora_mesh_fc_" + this->node_id_str_);
+  uint32_t hash = fnv1a_str(std::string(NVS_PREFIX_FRAME_COUNTER) + this->node_id_str_);
   this->frame_counter_pref_ = global_preferences->make_preference<uint32_t>(hash, true);
 
   uint32_t stored = 0;
@@ -1008,7 +1012,7 @@ void LoraMesh::load_frame_counter_() {
 }
 
 void LoraMesh::persist_group_key_() {
-  uint32_t hash = fnv1a_str("lora_mesh_gk_" + this->node_id_str_);
+  uint32_t hash = fnv1a_str(std::string(NVS_PREFIX_GROUP_KEY) + this->node_id_str_);
   this->group_key_pref_ = global_preferences->make_preference<uint8_t[GROUP_KEY_SIZE + 1]>(hash, true);
 
   // Store: 1-byte flag (has_key) + 16-byte key.
@@ -1019,7 +1023,7 @@ void LoraMesh::persist_group_key_() {
 }
 
 void LoraMesh::load_group_key_() {
-  uint32_t hash = fnv1a_str("lora_mesh_gk_" + this->node_id_str_);
+  uint32_t hash = fnv1a_str(std::string(NVS_PREFIX_GROUP_KEY) + this->node_id_str_);
   this->group_key_pref_ = global_preferences->make_preference<uint8_t[GROUP_KEY_SIZE + 1]>(hash, true);
 
   uint8_t buf[GROUP_KEY_SIZE + 1];

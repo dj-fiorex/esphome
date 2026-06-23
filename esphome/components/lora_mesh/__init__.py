@@ -1,5 +1,7 @@
 """ESPHome lora_mesh component — LoRa multi-hop mesh networking."""
 
+import re
+
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import binary_sensor, sensor, text_sensor
@@ -69,6 +71,13 @@ GATEWAY_MODES = {
     "auto": GatewayMode.AUTO,
 }
 
+def _validate_hex_key(value):
+    """Validate that a string is exactly 32 hex characters."""
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", value):
+        raise cv.Invalid("group_key must be 32 hex characters [0-9a-fA-F]")
+    return value
+
+
 # ── Configuration schema ───────────────────────────────────────────────────────
 
 CONFIG_SCHEMA = cv.All(
@@ -87,7 +96,7 @@ CONFIG_SCHEMA = cv.All(
             # If provided at compile time, the node starts provisioned.
             # Can also be set at runtime via lora_mesh.set_group_key action.
             cv.Optional(CONF_GROUP_KEY): cv.All(
-                cv.string, cv.Length(min=32, max=32)
+                cv.string, cv.Length(min=32, max=32), _validate_hex_key
             ),
             # Gateway behaviour
             cv.Optional(CONF_GATEWAY, default="normal"): cv.enum(

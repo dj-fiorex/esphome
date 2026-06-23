@@ -98,6 +98,7 @@ inline void aes128_encrypt_block(const uint8_t key[16], const uint8_t in[16], ui
       0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16,
   };
 
+  // xtime: GF(2^8) multiplication by x with AES irreducible polynomial 0x11b.
   auto xtime = [](uint8_t x) -> uint8_t { return static_cast<uint8_t>((x << 1) ^ ((x & 0x80) ? 0x1b : 0)); };
 
   uint8_t state[16];
