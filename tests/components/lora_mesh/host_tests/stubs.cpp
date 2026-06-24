@@ -3,9 +3,13 @@
 // controllable from tests via test_clock_set()/test_clock_advance().
 
 #include "esphome/core/component.h"
+#include "esphome/core/preferences.h"
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <unordered_map>
+#include <vector>
 
 namespace esphome {
 
@@ -51,5 +55,63 @@ float Component::get_setup_priority() const { return 0.0f; }
 bool Component::can_proceed() { return true; }
 void Component::call_setup() { this->setup(); }
 void Component::mark_failed() {}
+
+// ─── Fake preferences backend for host tests ─────────────────────────────────
+
+// In-memory key-value store keyed by (hash, size) for the preferences system.
+static std::unordered_map<uint32_t, std::vector<uint8_t>> g_pref_store;
+
+struct FakePreferenceBackend : public PreferenceBackend {
+  uint32_t key;
+  size_t data_size;
+
+  FakePreferenceBackend(uint32_t key, size_t data_size) : key(key), data_size(data_size) {}
+
+  bool save(const uint8_t *data, size_t len) override {
+    g_pref_store[this->key].assign(data, data + len);
+    return true;
+  }
+
+  bool load(uint8_t *data, size_t len) override {
+    auto it = g_pref_store.find(this->key);
+    if (it == g_pref_store.end() || it->second.size() != len) {
+      return false;
+    }
+    memcpy(data, it->second.data(), len);
+    return true;
+  }
+};
+
+// Keep backends alive for the lifetime of the process.
+static std::vector<std::unique_ptr<FakePreferenceBackend>> g_backends;
+
+struct FakePreferences : public Preferences {
+  using PreferencesMixin<Preferences>::make_preference;
+
+  ESPPreferenceObject make_preference(size_t size, uint32_t type, bool /*in_flash*/) override {
+    return this->make_preference(size, type);
+  }
+
+  ESPPreferenceObject make_preference(size_t size, uint32_t type) override {
+    auto backend = std::make_unique<FakePreferenceBackend>(type, size);
+    auto *ptr = backend.get();
+    g_backends.push_back(std::move(backend));
+    return ESPPreferenceObject(ptr);
+  }
+
+  bool sync() override { return true; }
+  bool reset() override {
+    g_pref_store.clear();
+    return true;
+  }
+};
+
+static FakePreferences g_fake_prefs;
+ESPPreferences *global_preferences = &g_fake_prefs;  // NOLINT
+
+// Test helper: clear all persisted preferences (for test isolation).
+void test_preferences_clear() {
+  g_pref_store.clear();
+}
 
 }  // namespace esphome

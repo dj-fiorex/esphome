@@ -1,5 +1,7 @@
 """ESPHome lora_mesh component — LoRa multi-hop mesh networking."""
 
+import re
+
 from esphome import automation
 import esphome.codegen as cg
 from esphome.components import binary_sensor, sensor, text_sensor
@@ -16,6 +18,7 @@ MULTI_CONF = False
 CONF_RADIO_ID = "radio_id"
 CONF_NODE_ID = "node_id"
 CONF_MESH_SECRET = "mesh_secret"
+CONF_GROUP_KEY = "group_key"
 CONF_MAX_HOPS = "max_hops"
 CONF_DISCOVERY_INTERVAL = "discovery_interval"
 CONF_ROUTE_TTL = "route_ttl"
@@ -58,12 +61,22 @@ BroadcastMessageAction = lora_mesh_ns.class_(
 SendToGatewayAction = lora_mesh_ns.class_(
     "SendToGatewayAction", automation.Action, cg.Parented.template(LoraMesh)
 )
+SetGroupKeyAction = lora_mesh_ns.class_(
+    "SetGroupKeyAction", automation.Action, cg.Parented.template(LoraMesh)
+)
 
 GATEWAY_MODES = {
     "normal": GatewayMode.NORMAL,
     "gateway": GatewayMode.GATEWAY,
     "auto": GatewayMode.AUTO,
 }
+
+def _validate_hex_key(value):
+    """Validate that a string is exactly 32 hex characters."""
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", value):
+        raise cv.Invalid("group_key must be 32 hex characters [0-9a-fA-F]")
+    return value
+
 
 # ── Configuration schema ───────────────────────────────────────────────────────
 
@@ -79,6 +92,12 @@ CONFIG_SCHEMA = cv.All(
             # Node / mesh identity
             cv.Optional(CONF_NODE_ID): cv.templatable(cv.string),
             cv.Required(CONF_MESH_SECRET): cv.string,
+            # Per-Group encryption key (32 hex chars = 16 bytes AES-128).
+            # If provided at compile time, the node starts provisioned.
+            # Can also be set at runtime via lora_mesh.set_group_key action.
+            cv.Optional(CONF_GROUP_KEY): cv.All(
+                cv.string, cv.Length(min=32, max=32), _validate_hex_key
+            ),
             # Gateway behaviour
             cv.Optional(CONF_GATEWAY, default="normal"): cv.enum(
                 GATEWAY_MODES, lower=True
@@ -178,6 +197,8 @@ async def to_code(config) -> None:
         node_id_templ = await cg.templatable(config[CONF_NODE_ID], [], cg.std_string)
         cg.add(var.set_node_id(node_id_templ))
     cg.add(var.set_mesh_secret(config[CONF_MESH_SECRET]))
+    if CONF_GROUP_KEY in config:
+        cg.add(var.set_group_key_hex(config[CONF_GROUP_KEY]))
     cg.add(var.set_gateway_mode(config[CONF_GATEWAY]))
     cg.add(var.set_max_hops(config[CONF_MAX_HOPS]))
     cg.add(
@@ -294,4 +315,28 @@ async def send_to_gateway_action_to_code(config, action_id, template_arg, args):
     await cg.register_parented(var, config[CONF_ID])
     templ = await cg.templatable(config[CONF_PAYLOAD], args, cg.std_string)
     cg.add(var.set_payload(templ))
+    return var
+
+
+CONF_KEY = "key"
+
+SET_GROUP_KEY_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.use_id(LoraMesh),
+        cv.Required(CONF_KEY): cv.templatable(cv.string),
+    }
+)
+
+
+@automation.register_action(
+    "lora_mesh.set_group_key",
+    SetGroupKeyAction,
+    SET_GROUP_KEY_SCHEMA,
+    synchronous=True,
+)
+async def set_group_key_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    templ = await cg.templatable(config[CONF_KEY], args, cg.std_string)
+    cg.add(var.set_key(templ))
     return var

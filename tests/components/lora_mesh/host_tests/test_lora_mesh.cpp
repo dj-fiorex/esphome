@@ -30,8 +30,8 @@ static void test_broadcast_data_has_v3_header() {
 
   EXPECT_EQ(a.radio.sent.size(), 1u);
   const auto &pkt = a.radio.sent[0];
-  // 28-byte header + payload_len byte + 2 payload bytes
-  EXPECT_EQ(pkt.size(), HDR + 1 + 2);
+  // 28-byte header + payload_len byte + 2 ciphertext bytes + 4 MIC bytes
+  EXPECT_EQ(pkt.size(), HDR + 1 + 2 + MIC_SIZE);
   EXPECT_EQ(get_u32_le(&pkt[0]), FABRIC);      // fabric_id
   EXPECT_EQ(pkt[4], PKT_DATA);                 // pkt_type
   EXPECT_TRUE(pkt[5] & FLAG_BROADCAST);        // flags
@@ -43,8 +43,14 @@ static void test_broadcast_data_has_v3_header() {
   EXPECT_EQ(get_u32_le(&pkt[20]), NODE_A);     // prev_hop = originator
   EXPECT_EQ(get_u32_le(&pkt[24]), BROADCAST);  // next_hop = any (flood)
   EXPECT_EQ(pkt[HDR], 2);                      // payload_len
-  EXPECT_EQ(pkt[HDR + 1], 'h');
-  EXPECT_EQ(pkt[HDR + 2], 'i');
+
+  // Verify the ciphertext decrypts to "hi" with the test group key.
+  uint8_t plaintext[2];
+  bool ok = esphome::lora_mesh::mesh_decrypt_payload(TEST_GROUP_KEY, NODE_A, BROADCAST, 2, PKT_DATA, 2,
+                                                     &pkt[HDR + 1], plaintext, &pkt[HDR + 1 + 2]);
+  EXPECT_TRUE(ok);
+  EXPECT_EQ(plaintext[0], 'h');
+  EXPECT_EQ(plaintext[1], 'i');
 
   static_assert(esphome::lora_mesh::MESH_PROTO_VERSION == 3, "proto version must be 3");
   static_assert(esphome::lora_mesh::MESH_HEADER_SIZE == 28, "header must be 28 bytes");
@@ -52,7 +58,7 @@ static void test_broadcast_data_has_v3_header() {
 
 static void test_oversize_payload_truncated_consistently() {
   TestNode a("node-a");
-  // 250 bytes does not fit: 255 radio limit - 28 header - 1 len byte = 226 max.
+  // 250 bytes does not fit: 255 radio limit - 28 header - 1 len byte - 4 MIC = 222 max.
   std::string big(250, 'x');
 
   EXPECT_TRUE(a.mesh.broadcast_message(big));
@@ -61,7 +67,10 @@ static void test_oversize_payload_truncated_consistently() {
   EXPECT_EQ(a.radio.sent.size(), 1u);
   const auto &pkt = a.radio.sent[0];
   EXPECT_TRUE(pkt.size() <= 255u);
-  EXPECT_EQ(pkt[HDR], pkt.size() - HDR - 1);  // payload_len matches bytes on wire
+  // payload_len + ciphertext + MIC = pkt.size() - HDR - 1
+  uint8_t payload_len = pkt[HDR];
+  EXPECT_EQ(static_cast<size_t>(payload_len) + MIC_SIZE, pkt.size() - HDR - 1);
+  EXPECT_EQ(payload_len, 222u);  // 255 - 28 - 1 - 4 = 222
 }
 
 // ── Slice 2: HELLO at proto v3 ──────────────────────────────────────────────
@@ -384,11 +393,10 @@ static void test_at_most_one_transmit_per_loop() {
   a.mesh.loop();
   EXPECT_EQ(a.radio.sent.size(), 3u);
 
-  // FIFO order preserved.
-  EXPECT_EQ(a.radio.sent[0][HDR + 1], 'o');
-  EXPECT_EQ(a.radio.sent[1][HDR + 1], 't');
-  EXPECT_EQ(a.radio.sent[2][HDR + 1], 't');
-  EXPECT_EQ(a.radio.sent[2][HDR + 3], 'r');
+  // FIFO order preserved: check payload_len field (different lengths per message).
+  EXPECT_EQ(a.radio.sent[0][HDR], 3u);  // "one" → 3 bytes
+  EXPECT_EQ(a.radio.sent[1][HDR], 3u);  // "two" → 3 bytes
+  EXPECT_EQ(a.radio.sent[2][HDR], 5u);  // "three" → 5 bytes
 }
 
 static void test_forwarding_is_queued_not_inline() {
@@ -446,6 +454,145 @@ static void test_full_queue_drops_packet() {
   EXPECT_EQ(a.radio.sent.size(), 9u);
 }
 
+// ── Crypto / Group Key / Replay protection tests ────────────────────────────
+
+static void test_same_group_key_decrypts_payload() {
+  // A and B share the same key; A sends to B, B's on_message fires with correct plaintext.
+  TestNode a("node-a");
+  TestNode b("node-b");
+  b.receive(make_hello(FABRIC, NODE_A, "node-a"));
+
+  auto pkt = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "secret-msg", 10, 8, 0, NODE_A);
+  b.receive(pkt);
+
+  EXPECT_EQ(b.received.size(), 1u);
+  EXPECT_TRUE(b.received[0].payload == "secret-msg");
+}
+
+static void test_wrong_key_drops_packet() {
+  // C holds a different key from A; C receives A's packet but MIC fails, no on_message.
+  static const uint8_t WRONG_KEY[GROUP_KEY_SIZE] = {0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8,
+                                                    0xF7, 0xF6, 0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0};
+  TestNode c("node-c", "fabric-1", WRONG_KEY);
+  c.receive(make_hello(FABRIC, NODE_A, "node-a"));
+
+  // Packet encrypted with TEST_GROUP_KEY (A's key).
+  auto pkt = make_data(FABRIC, NODE_A, NODE_C, NODE_C, "for-c", 10, 8, 0, NODE_A, 0, TEST_GROUP_KEY);
+  c.receive(pkt);
+
+  EXPECT_EQ(c.received.size(), 0u);  // MIC failed — dropped
+}
+
+static void test_unprovisioned_node_relays_but_no_message() {
+  // B has no key (unprovisioned); receives a broadcast from A but does not fire on_message.
+  // However, it still forwards the packet.
+  TestNode b("node-b", "fabric-1", nullptr);  // no group key
+  b.receive(make_hello(FABRIC, NODE_A, "node-a"));
+
+  auto pkt = make_data(FABRIC, NODE_A, BROADCAST, BROADCAST, "hello-all", 10, 8, 0, NODE_A, 0, TEST_GROUP_KEY);
+  b.receive(pkt);
+
+  EXPECT_EQ(b.received.size(), 0u);  // unprovisioned: no on_message
+  // Forward should still be queued.
+  b.mesh.loop();
+  EXPECT_EQ(b.radio.sent.size(), 1u);  // forwarded the broadcast
+}
+
+static void test_replay_rejected() {
+  TestNode b("node-b");
+  b.receive(make_hello(FABRIC, NODE_A, "node-a"));
+
+  // First packet: frame_counter=10, delivers.
+  auto pkt1 = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "msg1", 10, 8, 0, NODE_A);
+  b.receive(pkt1);
+  EXPECT_EQ(b.received.size(), 1u);
+
+  // Replay with same frame_counter=10 — duplicate suppression in seen-cache catches this,
+  // but even if seen-cache expired, replay protection would catch it.
+  // Use a different frame_counter that's <= high_water but NOT in seen cache.
+  // Frame_counter=5 (lower than 10) is a replay.
+  auto pkt2 = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "replay", 5, 8, 0, NODE_A);
+  b.receive(pkt2);
+  EXPECT_EQ(b.received.size(), 1u);  // replay rejected, still only 1 message
+
+  // Forward progression: frame_counter=11 should be accepted.
+  auto pkt3 = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "msg2", 11, 8, 0, NODE_A);
+  b.receive(pkt3);
+  EXPECT_EQ(b.received.size(), 2u);
+}
+
+static void test_frame_counter_persists_across_reboot() {
+  // Simulate: node A sends messages, then "reboots" (new TestNode with same identity).
+  // The frame counter should resume from the NVS-persisted value, never reusing.
+  {
+    TestNode a("node-a");
+    // After setup + loop, frame_counter is at 1 (HELLO).
+    // Send 3 messages: frame_counters 2, 3, 4.
+    a.mesh.broadcast_message("m1");
+    a.mesh.broadcast_message("m2");
+    a.mesh.broadcast_message("m3");
+    a.mesh.loop();
+    a.mesh.loop();
+    a.mesh.loop();
+  }
+  // "Reboot" — new TestNode with same node_id should load persisted counter.
+  {
+    TestNode a2("node-a");
+    // After setup, frame_counter should be >= persisted-ahead value (1000+).
+    a2.mesh.broadcast_message("after-reboot");
+    a2.mesh.loop();
+    EXPECT_EQ(a2.radio.sent.size(), 1u);
+    // The frame counter should be well above 4 (the last used value).
+    uint32_t fc = get_u32_le(&a2.radio.sent[0][14]);
+    EXPECT_TRUE(fc > 1000u);  // Persisted-ahead batch
+  }
+}
+
+static void test_set_group_key_provisions_node() {
+  // Start unprovisioned, then set key and verify DATA is now processed.
+  TestNode b("node-b", "fabric-1", nullptr);  // unprovisioned
+  b.receive(make_hello(FABRIC, NODE_A, "node-a"));
+
+  // Receive encrypted DATA — should be dropped (unprovisioned).
+  auto pkt = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "secret", 10, 8, 0, NODE_A, 0, TEST_GROUP_KEY);
+  b.receive(pkt);
+  EXPECT_EQ(b.received.size(), 0u);
+
+  // Now provision with the correct key.
+  b.mesh.set_group_key(TEST_GROUP_KEY, GROUP_KEY_SIZE);
+  EXPECT_TRUE(b.mesh.is_provisioned());
+
+  // Send another packet with a higher frame_counter.
+  auto pkt2 = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "hello", 20, 8, 0, NODE_A, 0, TEST_GROUP_KEY);
+  b.receive(pkt2);
+  EXPECT_EQ(b.received.size(), 1u);
+  EXPECT_TRUE(b.received[0].payload == "hello");
+}
+
+static void test_relay_without_key_forwards_correctly() {
+  // Three-node line: A→B→C. B has no key but still forwards.
+  TestNode b("node-b", "fabric-1", nullptr);  // relay, no key
+  TestNode c("node-c");
+
+  // B knows routes: A is direct neighbour, C is direct neighbour.
+  b.receive(make_hello(FABRIC, NODE_A, "node-a"));
+  b.receive(make_hello(FABRIC, NODE_C, "node-c", {}, 0, 2));
+
+  // A sends unicast to C via B.
+  auto pkt = make_data(FABRIC, NODE_A, NODE_C, NODE_B, "for-c", 10, 8, 0, NODE_A, 0, TEST_GROUP_KEY);
+  b.receive(pkt);
+
+  // B should forward (no on_message since unicast is not for B).
+  b.mesh.loop();
+  EXPECT_EQ(b.radio.sent.size(), 1u);
+
+  // C receives the forwarded packet and decrypts it.
+  c.receive(make_hello(FABRIC, NODE_B, "node-b"));
+  c.mesh.on_radio_packet(b.radio.sent[0].data(), b.radio.sent[0].size(), -60.0f, 8.0f);
+  EXPECT_EQ(c.received.size(), 1u);
+  EXPECT_TRUE(c.received[0].payload == "for-c");
+}
+
 int main() {
   RUN_TEST(test_broadcast_data_has_v3_header);
   RUN_TEST(test_oversize_payload_truncated_consistently);
@@ -468,6 +615,14 @@ int main() {
   RUN_TEST(test_forwarding_is_queued_not_inline);
   RUN_TEST(test_randomized_backoff_delays_transmit);
   RUN_TEST(test_full_queue_drops_packet);
+  // Crypto / Group Key / Replay tests
+  RUN_TEST(test_same_group_key_decrypts_payload);
+  RUN_TEST(test_wrong_key_drops_packet);
+  RUN_TEST(test_unprovisioned_node_relays_but_no_message);
+  RUN_TEST(test_replay_rejected);
+  RUN_TEST(test_frame_counter_persists_across_reboot);
+  RUN_TEST(test_set_group_key_provisions_node);
+  RUN_TEST(test_relay_without_key_forwards_correctly);
   printf("\n%s (%d failure%s)\n", g_failures == 0 ? "OK" : "FAILED", g_failures, g_failures == 1 ? "" : "s");
   return g_failures == 0 ? 0 : 1;
 }

@@ -9,6 +9,7 @@
 // (docs/wire-format.md), independently of the component's own builders.
 
 #include "esphome/components/lora_mesh/lora_mesh.h"
+#include "esphome/components/lora_mesh/lora_mesh_crypto.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -19,6 +20,7 @@ namespace esphome {
 void test_clock_set(uint32_t ms);
 void test_clock_advance(uint32_t ms);
 void test_random_set(uint32_t v);
+void test_preferences_clear();
 }  // namespace esphome
 
 // ── Assertions ──────────────────────────────────────────────────────────────
@@ -51,6 +53,7 @@ extern int g_failures;
     int before_ = g_failures; \
     esphome::test_clock_set(1000); \
     esphome::test_random_set(0); \
+    esphome::test_preferences_clear(); \
     fn(); \
     printf("%s %s\n", g_failures == before_ ? "PASS" : "FAIL", #fn); \
   } while (0)
@@ -64,6 +67,8 @@ using esphome::lora_mesh::Packet;
 using esphome::lora_mesh::fnv1a_str;
 using esphome::lora_mesh::get_u32_le;
 using esphome::lora_mesh::put_u32_le;
+using esphome::lora_mesh::GROUP_KEY_SIZE;
+using esphome::lora_mesh::MIC_SIZE;
 
 class FakeRadio : public esphome::lora_mesh::LoRaRadio {
  public:
@@ -75,6 +80,10 @@ class FakeRadio : public esphome::lora_mesh::LoRaRadio {
   LoraMesh *listener{nullptr};
 };
 
+// Default test group key (all zeros except first byte = 0x01).
+static const uint8_t TEST_GROUP_KEY[GROUP_KEY_SIZE] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+                                                       0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10};
+
 // ── Node fixture ────────────────────────────────────────────────────────────
 
 struct TestNode {
@@ -82,13 +91,18 @@ struct TestNode {
   LoraMesh mesh;
   std::vector<esphome::lora_mesh::MeshMessage> received;
 
-  explicit TestNode(const std::string &node_id, const std::string &fabric = "fabric-1") {
+  explicit TestNode(const std::string &node_id, const std::string &fabric = "fabric-1",
+                    const uint8_t *group_key = TEST_GROUP_KEY) {
     this->mesh.set_radio(&this->radio);
     this->mesh.set_node_id(esphome::TemplatableValue<std::string>(node_id));
     this->mesh.set_mesh_secret(fabric);
     this->mesh.add_on_message_callback(
         [this](const esphome::lora_mesh::MeshMessage &msg) { this->received.push_back(msg); });
     this->mesh.setup();
+    // Set group key after setup so NVS persistence works (node_id_str_ is set).
+    if (group_key != nullptr) {
+      this->mesh.set_group_key(group_key, GROUP_KEY_SIZE);
+    }
     // The first loop() emits the initial HELLO (frame_counter 1, jitter
     // stubbed to 0); consume it so tests start with an empty TX queue.
     this->mesh.loop();
@@ -151,18 +165,33 @@ inline std::vector<uint8_t> make_hello(uint32_t fabric_id, uint32_t src_id, cons
   return pkt;
 }
 
-/// DATA packet (spec §4, plaintext payload for this slice — crypto is a later issue).
+/// Encrypted DATA packet (spec §4): payload encrypted with group key, 4-byte MIC appended.
 inline std::vector<uint8_t> make_data(uint32_t fabric_id, uint32_t src_id, uint32_t dst_id, uint32_t next_hop,
                                       const std::string &payload, uint32_t frame_counter = 1, uint8_t ttl = 8,
-                                      uint8_t hop_count = 0, uint32_t prev_hop = 0, uint8_t extra_flags = 0) {
+                                      uint8_t hop_count = 0, uint32_t prev_hop = 0, uint8_t extra_flags = 0,
+                                      const uint8_t *group_key = TEST_GROUP_KEY) {
   uint8_t flags = extra_flags;
   if (dst_id == BROADCAST) {
     flags |= FLAG_BROADCAST;
   }
   auto pkt = make_header(fabric_id, PKT_DATA, flags, src_id, dst_id, frame_counter, ttl, hop_count,
                          prev_hop != 0 ? prev_hop : src_id, next_hop);
-  pkt.push_back(static_cast<uint8_t>(payload.size()));
-  pkt.insert(pkt.end(), payload.begin(), payload.end());
+  uint8_t payload_len = static_cast<uint8_t>(payload.size());
+  pkt.push_back(payload_len);
+
+  if (group_key != nullptr) {
+    // Encrypt the payload.
+    uint8_t ciphertext[226];
+    uint8_t mic[MIC_SIZE];
+    esphome::lora_mesh::mesh_encrypt_payload(group_key, src_id, dst_id, frame_counter, PKT_DATA, payload_len,
+                                             reinterpret_cast<const uint8_t *>(payload.data()), ciphertext, mic);
+    pkt.insert(pkt.end(), ciphertext, ciphertext + payload_len);
+    pkt.insert(pkt.end(), mic, mic + MIC_SIZE);
+  } else {
+    // Plaintext (unprovisioned sender).
+    pkt.insert(pkt.end(), payload.begin(), payload.end());
+    pkt.insert(pkt.end(), MIC_SIZE, 0);  // zero MIC
+  }
   return pkt;
 }
 

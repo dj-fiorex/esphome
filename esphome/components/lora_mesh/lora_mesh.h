@@ -3,6 +3,8 @@
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
+#include "esphome/core/preferences.h"
+#include "lora_mesh_crypto.h"
 #include "lora_packet.h"
 #include "lora_radio.h"
 
@@ -49,6 +51,12 @@ class LoraMesh : public Component {
     this->has_node_id_ = true;
   }
   void set_mesh_secret(const std::string &secret) { this->mesh_secret_ = secret; }
+  /** Set the group key at runtime; persisted to NVS. Pass empty/nullptr to unprovision. */
+  void set_group_key(const uint8_t *key, size_t len);
+  /** Overload accepting a hex string (32 hex chars = 16 bytes). */
+  void set_group_key_hex(const std::string &hex_key);
+  /** Returns true if this node holds a valid group key (provisioned). */
+  bool is_provisioned() const { return this->has_group_key_; }
   void set_gateway_mode(GatewayMode mode) { this->gateway_mode_ = mode; }
   void set_max_hops(uint8_t max_hops) { this->max_hops_ = max_hops; }
   void set_discovery_interval(uint32_t ms) { this->discovery_interval_ms_ = ms; }
@@ -175,7 +183,21 @@ class LoraMesh : public Component {
 
   // ── Utility ───────────────────────────────────────────────────────────
   static void id_to_hex(uint32_t id, char out[9]);
-  uint32_t next_frame_counter_() { return ++this->frame_counter_; }
+  uint32_t next_frame_counter_();
+
+  // ── Frame counter persistence ─────────────────────────────────────────
+  void persist_frame_counter_();
+  void load_frame_counter_();
+
+  // ── Group key persistence ─────────────────────────────────────────────
+  void persist_group_key_();
+  void load_group_key_();
+
+  // ── Replay protection ─────────────────────────────────────────────────
+  /** Check frame_counter against per-source high-water mark; returns true if replay. */
+  bool is_replay_(uint32_t src_id, uint32_t frame_counter);
+  /** Update high-water mark for a source after successful MIC verification. */
+  void update_replay_counter_(uint32_t src_id, uint32_t frame_counter);
 
   // ── State ──────────────────────────────────────────────────────────────
   LoRaRadio *radio_{nullptr};
@@ -197,6 +219,28 @@ class LoraMesh : public Component {
   uint32_t last_hello_{0};
   uint32_t last_expire_check_{0};
   uint32_t last_diag_publish_{0};
+
+  // ── Group key (per-Group security layer) ──────────────────────────────
+  uint8_t group_key_[GROUP_KEY_SIZE]{};
+  bool has_group_key_{false};
+
+  // ── Frame counter persistence (batched NVS writes) ────────────────────
+  // We persist frame_counter_ in batches: on boot we load the persisted value
+  // (which was written ahead by FRAME_COUNTER_BATCH) and set our counter to
+  // that value. On TX we only write to NVS when we exhaust the current batch.
+  static constexpr uint32_t FRAME_COUNTER_BATCH = 1000;
+  uint32_t frame_counter_persist_threshold_{0};  // write NVS when frame_counter_ >= this
+  ESPPreferenceObject frame_counter_pref_{};
+  ESPPreferenceObject group_key_pref_{};
+
+  // ── Replay protection (per-source high-water marks) ───────────────────
+  struct ReplayEntry {
+    uint32_t src_id{0};
+    uint32_t high_water{0};
+    bool is_valid{false};
+  };
+  // Same capacity as the routing table — one entry per known source.
+  std::array<ReplayEntry, LORA_MESH_MAX_ROUTES> replay_counters_{};
 
   // Fixed-size arrays (sizes set by LORA_MESH_MAX_ROUTES / LORA_MESH_SEEN_CACHE_SIZE defines)
   std::array<RouteEntry, LORA_MESH_MAX_ROUTES> routes_{};
