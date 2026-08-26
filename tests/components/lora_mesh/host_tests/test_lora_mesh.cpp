@@ -1,5 +1,4 @@
-// Behavior tests for the lora_mesh proto-v3 wire format and single-path
-// unicast forwarding (GitHub issue #10, docs/wire-format.md, ADR 0002).
+// Behavior tests for the lora_mesh wire format and single-path unicast forwarding.
 
 #include "test_harness.h"
 
@@ -7,11 +6,15 @@ int g_failures = 0;
 
 using namespace lmtest;
 
-static const uint32_t FABRIC = fnv1a_str("fabric-1");
+static const uint32_t FABRIC = 0xDEFF3662;
 static const uint32_t NODE_A = fnv1a_str("node-a");
 static const uint32_t NODE_B = fnv1a_str("node-b");
 static const uint32_t NODE_C = fnv1a_str("node-c");
 static const uint32_t NODE_D = fnv1a_str("node-d");
+
+// AES-128-CCM(TEST_FABRIC_KEY, nonce="LORA-FABRICID", empty plaintext,
+// AAD="LORA-MESH-ID-v1", tag=8) starts with 62 36 ff de. The public Fabric ID
+// uses those first four tag bytes as little-endian.
 
 /// Advance the fake clock and run one loop() so periodic work (HELLO beacon,
 /// route/seen-cache expiry) gets a chance to fire at the new time.
@@ -20,9 +23,21 @@ static void advance_and_loop(TestNode &n, uint32_t ms) {
   n.mesh.loop();
 }
 
-// ── Slice 1: proto-v3 header on transmitted DATA ────────────────────────────
+static void test_protocol_v4_derives_fabric_id_and_uses_eight_byte_data_tag() {
+  TestNode a("node-a");
 
-static void test_broadcast_data_has_v3_header() {
+  EXPECT_TRUE(a.mesh.broadcast_message("hi"));
+  a.mesh.loop();
+
+  EXPECT_EQ(esphome::lora_mesh::MESH_PROTO_VERSION, 4);
+  EXPECT_EQ(esphome::lora_mesh::DATA_AUTH_TAG_SIZE, 8u);
+  EXPECT_EQ(get_u32_le(&a.radio.sent[0][0]), FABRIC);
+  EXPECT_EQ(a.radio.sent[0].size(), HDR + 1 + 2 + 8);
+}
+
+// ── Slice 1: protocol-v4 header on transmitted DATA ─────────────────────────
+
+static void test_broadcast_data_has_v4_header() {
   TestNode a("node-a");
 
   EXPECT_TRUE(a.mesh.broadcast_message("hi"));
@@ -30,8 +45,8 @@ static void test_broadcast_data_has_v3_header() {
 
   EXPECT_EQ(a.radio.sent.size(), 1u);
   const auto &pkt = a.radio.sent[0];
-  // 28-byte header + payload_len byte + 2 ciphertext bytes + 4 MIC bytes
-  EXPECT_EQ(pkt.size(), HDR + 1 + 2 + MIC_SIZE);
+  // 28-byte header + payload_len byte + 2 ciphertext bytes + 8 tag bytes
+  EXPECT_EQ(pkt.size(), HDR + 1 + 2 + DATA_AUTH_TAG_SIZE);
   EXPECT_EQ(get_u32_le(&pkt[0]), FABRIC);      // fabric_id
   EXPECT_EQ(pkt[4], PKT_DATA);                 // pkt_type
   EXPECT_TRUE(pkt[5] & FLAG_BROADCAST);        // flags
@@ -44,21 +59,21 @@ static void test_broadcast_data_has_v3_header() {
   EXPECT_EQ(get_u32_le(&pkt[24]), BROADCAST);  // next_hop = any (flood)
   EXPECT_EQ(pkt[HDR], 2);                      // payload_len
 
-  // Verify the ciphertext decrypts to "hi" with the test group key.
+  // Verify the ciphertext decrypts to "hi" with the test Fabric Key.
   uint8_t plaintext[2];
-  bool ok = esphome::lora_mesh::mesh_decrypt_payload(TEST_GROUP_KEY, NODE_A, BROADCAST, 2, PKT_DATA, 2,
-                                                     &pkt[HDR + 1], plaintext, &pkt[HDR + 1 + 2]);
+  bool ok = esphome::lora_mesh::mesh_decrypt_payload(TEST_FABRIC_KEY, NODE_A, BROADCAST, 2, PKT_DATA, 2, &pkt[HDR + 1],
+                                                     plaintext, &pkt[HDR + 1 + 2]);
   EXPECT_TRUE(ok);
   EXPECT_EQ(plaintext[0], 'h');
   EXPECT_EQ(plaintext[1], 'i');
 
-  static_assert(esphome::lora_mesh::MESH_PROTO_VERSION == 3, "proto version must be 3");
+  static_assert(esphome::lora_mesh::MESH_PROTO_VERSION == 4, "proto version must be 4");
   static_assert(esphome::lora_mesh::MESH_HEADER_SIZE == 28, "header must be 28 bytes");
 }
 
 static void test_oversize_payload_truncated_consistently() {
   TestNode a("node-a");
-  // 250 bytes does not fit: 255 radio limit - 28 header - 1 len byte - 4 MIC = 222 max.
+  // 250 bytes does not fit: 255 radio limit - 28 header - 1 len byte - 8 tag bytes = 218 max.
   std::string big(250, 'x');
 
   EXPECT_TRUE(a.mesh.broadcast_message(big));
@@ -67,15 +82,15 @@ static void test_oversize_payload_truncated_consistently() {
   EXPECT_EQ(a.radio.sent.size(), 1u);
   const auto &pkt = a.radio.sent[0];
   EXPECT_TRUE(pkt.size() <= 255u);
-  // payload_len + ciphertext + MIC = pkt.size() - HDR - 1
+  // payload_len + ciphertext + tag = pkt.size() - HDR - 1
   uint8_t payload_len = pkt[HDR];
-  EXPECT_EQ(static_cast<size_t>(payload_len) + MIC_SIZE, pkt.size() - HDR - 1);
-  EXPECT_EQ(payload_len, 222u);  // 255 - 28 - 1 - 4 = 222
+  EXPECT_EQ(static_cast<size_t>(payload_len) + DATA_AUTH_TAG_SIZE, pkt.size() - HDR - 1);
+  EXPECT_EQ(payload_len, 218u);
 }
 
-// ── Slice 2: HELLO at proto v3 ──────────────────────────────────────────────
+// ── Slice 2: HELLO at protocol v4 ───────────────────────────────────────────
 
-static void test_own_hello_has_v3_body_at_offset_28() {
+static void test_own_hello_has_v4_body_at_offset_28() {
   TestNode a("node-a");
 
   // The initial HELLO is consumed by the fixture; trigger the next beacon.
@@ -87,7 +102,7 @@ static void test_own_hello_has_v3_body_at_offset_28() {
   EXPECT_EQ(get_u32_le(&pkt[10]), BROADCAST);  // dst
   EXPECT_EQ(get_u32_le(&pkt[24]), BROADCAST);  // next_hop
   EXPECT_TRUE(pkt.size() >= HDR + 3);
-  EXPECT_EQ(pkt[HDR], 3);      // proto_version
+  EXPECT_EQ(pkt[HDR], 4);      // proto_version
   EXPECT_EQ(pkt[HDR + 1], 6);  // name_len
   EXPECT_TRUE(std::string(pkt.begin() + HDR + 2, pkt.begin() + HDR + 8) == "node-a");
   EXPECT_EQ(pkt[HDR + 8], 0);  // route_count (no routes yet)
@@ -102,6 +117,17 @@ static void test_hello_builds_direct_and_advertised_routes() {
   EXPECT_TRUE(a.mesh.has_route("node-b"));
   EXPECT_TRUE(a.mesh.has_route("node-c"));
   EXPECT_FALSE(a.mesh.has_route("node-x"));
+}
+
+static void test_protocol_v3_hello_is_rejected_without_route_state() {
+  TestNode a("node-a");
+  auto packet = make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 1, -70}});
+  packet[HDR] = 3;
+
+  a.receive(packet);
+
+  EXPECT_FALSE(a.mesh.has_route("node-b"));
+  EXPECT_FALSE(a.mesh.has_route("node-c"));
 }
 
 static void test_fabric_mismatch_drops_packet() {
@@ -287,16 +313,13 @@ static void test_dead_next_hop_invalidates_dependent_routes() {
 
   // Diverge the leases so C-via-B outlives B's direct route: learn C via B
   // under a long TTL, then shorten the TTL and renew only B's direct route —
-  // a HELLO from a different proto version proves B is alive (direct route
-  // refreshes) but its body, including the route digest, is skipped.
+  // a HELLO without advertisements refreshes B without refreshing C.
   a.mesh.set_route_ttl(600000);
   a.receive(make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 1, -70}}, 0, 1));
   EXPECT_EQ(a.mesh.get_known_node_count(), 2u);
 
   a.mesh.set_route_ttl(10000);
-  auto alien_hello = make_hello(FABRIC, NODE_B, "node-b", {}, 0, 2);
-  alien_hello[HDR] = 2;  // proto_version mismatch
-  a.receive(alien_hello);
+  a.receive(make_hello(FABRIC, NODE_B, "node-b", {}, 0, 2));
 
   // B goes silent. Its direct route expires while C-via-B still holds a
   // ~10-minute lease; healing must drop C with it instead of black-holing.
@@ -454,9 +477,9 @@ static void test_full_queue_drops_packet() {
   EXPECT_EQ(a.radio.sent.size(), 9u);
 }
 
-// ── Crypto / Group Key / Replay protection tests ────────────────────────────
+// ── Fabric Key DATA security / replay protection tests ──────────────────────
 
-static void test_same_group_key_decrypts_payload() {
+static void test_same_fabric_key_decrypts_payload() {
   // A and B share the same key; A sends to B, B's on_message fires with correct plaintext.
   TestNode a("node-a");
   TestNode b("node-b");
@@ -470,32 +493,35 @@ static void test_same_group_key_decrypts_payload() {
 }
 
 static void test_wrong_key_drops_packet() {
-  // C holds a different key from A; C receives A's packet but MIC fails, no on_message.
-  static const uint8_t WRONG_KEY[GROUP_KEY_SIZE] = {0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8,
-                                                    0xF7, 0xF6, 0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0};
-  TestNode c("node-c", "fabric-1", WRONG_KEY);
+  static const uint8_t WRONG_KEY[FABRIC_KEY_SIZE] = {0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8,
+                                                     0xF7, 0xF6, 0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0};
+  TestNode c("node-c");
   c.receive(make_hello(FABRIC, NODE_A, "node-a"));
 
-  // Packet encrypted with TEST_GROUP_KEY (A's key).
-  auto pkt = make_data(FABRIC, NODE_A, NODE_C, NODE_C, "for-c", 10, 8, 0, NODE_A, 0, TEST_GROUP_KEY);
+  auto pkt = make_data(FABRIC, NODE_A, NODE_C, NODE_C, "for-c", 10, 8, 0, NODE_A, 0, WRONG_KEY);
   c.receive(pkt);
 
-  EXPECT_EQ(c.received.size(), 0u);  // MIC failed — dropped
+  EXPECT_EQ(c.received.size(), 0u);
 }
 
-static void test_unprovisioned_node_relays_but_no_message() {
-  // B has no key (unprovisioned); receives a broadcast from A but does not fire on_message.
-  // However, it still forwards the packet.
-  TestNode b("node-b", "fabric-1", nullptr);  // no group key
-  b.receive(make_hello(FABRIC, NODE_A, "node-a"));
+static void test_modified_data_does_not_reach_application_callback() {
+  TestNode b("node-b");
+  auto pkt = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "authentic", 10, 8, 0, NODE_A);
 
-  auto pkt = make_data(FABRIC, NODE_A, BROADCAST, BROADCAST, "hello-all", 10, 8, 0, NODE_A, 0, TEST_GROUP_KEY);
+  pkt[HDR + 1] ^= 0x01;
   b.receive(pkt);
 
-  EXPECT_EQ(b.received.size(), 0u);  // unprovisioned: no on_message
-  // Forward should still be queued.
-  b.mesh.loop();
-  EXPECT_EQ(b.radio.sent.size(), 1u);  // forwarded the broadcast
+  EXPECT_EQ(b.received.size(), 0u);
+}
+
+static void test_protocol_v3_four_byte_data_tag_is_rejected() {
+  TestNode b("node-b");
+  auto packet = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "legacy", 10, 8, 0, NODE_A);
+  packet.resize(packet.size() - 4);
+
+  b.receive(packet);
+
+  EXPECT_EQ(b.received.size(), 0u);
 }
 
 static void test_replay_rejected() {
@@ -548,56 +574,13 @@ static void test_frame_counter_persists_across_reboot() {
   }
 }
 
-static void test_set_group_key_provisions_node() {
-  // Start unprovisioned, then set key and verify DATA is now processed.
-  TestNode b("node-b", "fabric-1", nullptr);  // unprovisioned
-  b.receive(make_hello(FABRIC, NODE_A, "node-a"));
-
-  // Receive encrypted DATA — should be dropped (unprovisioned).
-  auto pkt = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "secret", 10, 8, 0, NODE_A, 0, TEST_GROUP_KEY);
-  b.receive(pkt);
-  EXPECT_EQ(b.received.size(), 0u);
-
-  // Now provision with the correct key.
-  b.mesh.set_group_key(TEST_GROUP_KEY, GROUP_KEY_SIZE);
-  EXPECT_TRUE(b.mesh.is_provisioned());
-
-  // Send another packet with a higher frame_counter.
-  auto pkt2 = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "hello", 20, 8, 0, NODE_A, 0, TEST_GROUP_KEY);
-  b.receive(pkt2);
-  EXPECT_EQ(b.received.size(), 1u);
-  EXPECT_TRUE(b.received[0].payload == "hello");
-}
-
-static void test_relay_without_key_forwards_correctly() {
-  // Three-node line: A→B→C. B has no key but still forwards.
-  TestNode b("node-b", "fabric-1", nullptr);  // relay, no key
-  TestNode c("node-c");
-
-  // B knows routes: A is direct neighbour, C is direct neighbour.
-  b.receive(make_hello(FABRIC, NODE_A, "node-a"));
-  b.receive(make_hello(FABRIC, NODE_C, "node-c", {}, 0, 2));
-
-  // A sends unicast to C via B.
-  auto pkt = make_data(FABRIC, NODE_A, NODE_C, NODE_B, "for-c", 10, 8, 0, NODE_A, 0, TEST_GROUP_KEY);
-  b.receive(pkt);
-
-  // B should forward (no on_message since unicast is not for B).
-  b.mesh.loop();
-  EXPECT_EQ(b.radio.sent.size(), 1u);
-
-  // C receives the forwarded packet and decrypts it.
-  c.receive(make_hello(FABRIC, NODE_B, "node-b"));
-  c.mesh.on_radio_packet(b.radio.sent[0].data(), b.radio.sent[0].size(), -60.0f, 8.0f);
-  EXPECT_EQ(c.received.size(), 1u);
-  EXPECT_TRUE(c.received[0].payload == "for-c");
-}
-
 int main() {
-  RUN_TEST(test_broadcast_data_has_v3_header);
+  RUN_TEST(test_protocol_v4_derives_fabric_id_and_uses_eight_byte_data_tag);
+  RUN_TEST(test_broadcast_data_has_v4_header);
   RUN_TEST(test_oversize_payload_truncated_consistently);
-  RUN_TEST(test_own_hello_has_v3_body_at_offset_28);
+  RUN_TEST(test_own_hello_has_v4_body_at_offset_28);
   RUN_TEST(test_hello_builds_direct_and_advertised_routes);
+  RUN_TEST(test_protocol_v3_hello_is_rejected_without_route_state);
   RUN_TEST(test_fabric_mismatch_drops_packet);
   RUN_TEST(test_unicast_send_sets_next_hop_from_routing_table);
   RUN_TEST(test_unicast_delivered_to_destination);
@@ -615,14 +598,13 @@ int main() {
   RUN_TEST(test_forwarding_is_queued_not_inline);
   RUN_TEST(test_randomized_backoff_delays_transmit);
   RUN_TEST(test_full_queue_drops_packet);
-  // Crypto / Group Key / Replay tests
-  RUN_TEST(test_same_group_key_decrypts_payload);
+  // Fabric Key DATA security / replay tests
+  RUN_TEST(test_same_fabric_key_decrypts_payload);
   RUN_TEST(test_wrong_key_drops_packet);
-  RUN_TEST(test_unprovisioned_node_relays_but_no_message);
+  RUN_TEST(test_modified_data_does_not_reach_application_callback);
+  RUN_TEST(test_protocol_v3_four_byte_data_tag_is_rejected);
   RUN_TEST(test_replay_rejected);
   RUN_TEST(test_frame_counter_persists_across_reboot);
-  RUN_TEST(test_set_group_key_provisions_node);
-  RUN_TEST(test_relay_without_key_forwards_correctly);
   printf("\n%s (%d failure%s)\n", g_failures == 0 ? "OK" : "FAILED", g_failures, g_failures == 1 ? "" : "s");
   return g_failures == 0 ? 0 : 1;
 }

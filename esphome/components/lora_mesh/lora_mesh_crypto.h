@@ -1,11 +1,11 @@
 #pragma once
 
-// AES-128-CCM payload encryption/decryption for lora_mesh per-Group security.
+// AES-128-CCM payload encryption/decryption for one lora_mesh Fabric Key.
 // Wire format: docs/wire-format.md §4.
 //
 // Nonce  (13 bytes): src_id(4) || dst_id(4) || frame_counter(4) || 0x00(1)
 // AAD    (14 bytes): pkt_type(1) || src_id(4) || dst_id(4) || frame_counter(4) || payload_len(1)
-// MIC    (4 bytes):  truncated CCM tag appended after ciphertext
+// Tag    (8 bytes):  CCM authentication tag appended after ciphertext
 //
 // On embedded targets this uses mbedtls (already linked by ESP-IDF / Arduino).
 // Host tests use a tiny reference AES-CCM built from first principles.
@@ -15,11 +15,11 @@
 
 namespace esphome::lora_mesh {
 
-/// AES-128 key size in bytes.
-static constexpr size_t GROUP_KEY_SIZE = 16;
+/// Mandatory Fabric Key size in bytes (AES-128).
+static constexpr size_t FABRIC_KEY_SIZE = 16;
 
-/// MIC (Message Integrity Code) size in bytes — CCM tag truncated to 4 bytes.
-static constexpr size_t MIC_SIZE = 4;
+/// DATA authentication tag size in bytes.
+static constexpr size_t DATA_AUTH_TAG_SIZE = 8;
 
 /// Nonce size for AES-128-CCM (13 bytes).
 static constexpr size_t CCM_NONCE_SIZE = 13;
@@ -27,11 +27,16 @@ static constexpr size_t CCM_NONCE_SIZE = 13;
 /// AAD size for the DATA packet (14 bytes).
 static constexpr size_t CCM_AAD_SIZE = 14;
 
+/** Domain-separated AES-CCM inputs for the public Fabric ID derivation. */
+static constexpr uint8_t FABRIC_ID_DERIVATION_NONCE[13] = {'L', 'O', 'R', 'A', '-', 'F', 'A',
+                                                           'B', 'R', 'I', 'C', 'I', 'D'};
+static constexpr uint8_t FABRIC_ID_DERIVATION_AAD[15] = {'L', 'O', 'R', 'A', '-', 'M', 'E', 'S',
+                                                         'H', '-', 'I', 'D', '-', 'v', '1'};
+
 // ── Nonce / AAD construction ─────────────────────────────────────────────────
 
 /// Build the 13-byte CCM nonce: src_id || dst_id || frame_counter || 0x00.
-inline void build_ccm_nonce(uint8_t nonce[CCM_NONCE_SIZE], uint32_t src_id, uint32_t dst_id,
-                            uint32_t frame_counter) {
+inline void build_ccm_nonce(uint8_t nonce[CCM_NONCE_SIZE], uint32_t src_id, uint32_t dst_id, uint32_t frame_counter) {
   nonce[0] = static_cast<uint8_t>(src_id);
   nonce[1] = static_cast<uint8_t>(src_id >> 8);
   nonce[2] = static_cast<uint8_t>(src_id >> 16);
@@ -80,22 +85,20 @@ namespace detail {
 inline void aes128_encrypt_block(const uint8_t key[16], const uint8_t in[16], uint8_t out[16]) {
   // Rijndael S-box
   static const uint8_t SBOX[256] = {
-      0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
-      0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
-      0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
-      0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
-      0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
-      0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
-      0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
-      0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
-      0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
-      0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
-      0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
-      0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
-      0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
-      0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
-      0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
-      0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16,
+      0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76, 0xca, 0x82, 0xc9,
+      0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0, 0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f,
+      0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15, 0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07,
+      0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75, 0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3,
+      0x29, 0xe3, 0x2f, 0x84, 0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58,
+      0xcf, 0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8, 0x51, 0xa3,
+      0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2, 0xcd, 0x0c, 0x13, 0xec, 0x5f,
+      0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73, 0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88,
+      0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb, 0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac,
+      0x62, 0x91, 0x95, 0xe4, 0x79, 0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a,
+      0xae, 0x08, 0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a, 0x70,
+      0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e, 0xe1, 0xf8, 0x98, 0x11,
+      0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf, 0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42,
+      0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16,
   };
 
   // xtime: GF(2^8) multiplication by x with AES irreducible polynomial 0x11b.
@@ -107,27 +110,44 @@ inline void aes128_encrypt_block(const uint8_t key[16], const uint8_t in[16], ui
   memcpy(rk, key, 16);
 
   // Initial AddRoundKey
-  for (int i = 0; i < 16; i++) state[i] ^= rk[i];
+  for (int i = 0; i < 16; i++)
+    state[i] ^= rk[i];
 
   static const uint8_t RCON[10] = {0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36};
 
   for (int round = 0; round < 10; round++) {
     // Key schedule: expand rk in-place
     uint8_t temp[4] = {rk[13], rk[14], rk[15], rk[12]};
-    for (int i = 0; i < 4; i++) temp[i] = SBOX[temp[i]];
+    for (int i = 0; i < 4; i++)
+      temp[i] = SBOX[temp[i]];
     temp[0] ^= RCON[round];
-    for (int i = 0; i < 4; i++) rk[i] ^= temp[i];
-    for (int i = 4; i < 16; i++) rk[i] ^= rk[i - 4];
+    for (int i = 0; i < 4; i++)
+      rk[i] ^= temp[i];
+    for (int i = 4; i < 16; i++)
+      rk[i] ^= rk[i - 4];
 
     // SubBytes
-    for (int i = 0; i < 16; i++) state[i] = SBOX[state[i]];
+    for (int i = 0; i < 16; i++)
+      state[i] = SBOX[state[i]];
 
     // ShiftRows
     uint8_t t;
-    t = state[1]; state[1] = state[5]; state[5] = state[9]; state[9] = state[13]; state[13] = t;
-    t = state[2]; state[2] = state[10]; state[10] = t;
-    t = state[6]; state[6] = state[14]; state[14] = t;
-    t = state[15]; state[15] = state[11]; state[11] = state[7]; state[7] = state[3]; state[3] = t;
+    t = state[1];
+    state[1] = state[5];
+    state[5] = state[9];
+    state[9] = state[13];
+    state[13] = t;
+    t = state[2];
+    state[2] = state[10];
+    state[10] = t;
+    t = state[6];
+    state[6] = state[14];
+    state[14] = t;
+    t = state[15];
+    state[15] = state[11];
+    state[11] = state[7];
+    state[7] = state[3];
+    state[3] = t;
 
     // MixColumns (skip on last round)
     if (round < 9) {
@@ -142,18 +162,20 @@ inline void aes128_encrypt_block(const uint8_t key[16], const uint8_t in[16], ui
     }
 
     // AddRoundKey
-    for (int i = 0; i < 16; i++) state[i] ^= rk[i];
+    for (int i = 0; i < 16; i++)
+      state[i] ^= rk[i];
   }
 
   memcpy(out, state, 16);
 }
 
 /// AES-128-CCM encrypt (reference, for host tests).
-/// Returns true on success. `out` must have room for `plaintext_len + MIC_SIZE`.
-inline bool aes128_ccm_encrypt(const uint8_t key[16], const uint8_t *nonce, size_t nonce_len,
-                               const uint8_t *aad, size_t aad_len, const uint8_t *plaintext,
-                               size_t plaintext_len, uint8_t *out, uint8_t *tag, size_t tag_len) {
-  if (nonce_len != 13 || tag_len != 4) return false;
+/// Returns true on success. `out` must have room for `plaintext_len` bytes.
+inline bool aes128_ccm_encrypt(const uint8_t key[16], const uint8_t *nonce, size_t nonce_len, const uint8_t *aad,
+                               size_t aad_len, const uint8_t *plaintext, size_t plaintext_len, uint8_t *out,
+                               uint8_t *tag, size_t tag_len) {
+  if (nonce_len != 13 || tag_len != DATA_AUTH_TAG_SIZE)
+    return false;
 
   // q = 15 - nonce_len = 2 (encodes message length in 2 bytes)
   const uint8_t q = 2;
@@ -180,7 +202,8 @@ inline bool aes128_ccm_encrypt(const uint8_t key[16], const uint8_t *nonce, size
     size_t copy_now = (aad_len < space) ? aad_len : space;
     memcpy(aad_block + 2, aad, copy_now);
     aad_copied = copy_now;
-    for (int i = 0; i < 16; i++) mac[i] ^= aad_block[i];
+    for (int i = 0; i < 16; i++)
+      mac[i] ^= aad_block[i];
     aes128_encrypt_block(key, mac, mac);
 
     while (aad_copied < aad_len) {
@@ -189,7 +212,8 @@ inline bool aes128_ccm_encrypt(const uint8_t key[16], const uint8_t *nonce, size
       size_t take = (remain < 16) ? remain : 16;
       memcpy(blk, aad + aad_copied, take);
       aad_copied += take;
-      for (int i = 0; i < 16; i++) mac[i] ^= blk[i];
+      for (int i = 0; i < 16; i++)
+        mac[i] ^= blk[i];
       aes128_encrypt_block(key, mac, mac);
     }
   }
@@ -202,7 +226,8 @@ inline bool aes128_ccm_encrypt(const uint8_t key[16], const uint8_t *nonce, size
     size_t take = (remain < 16) ? remain : 16;
     memcpy(blk, plaintext + offset, take);
     offset += take;
-    for (int i = 0; i < 16; i++) mac[i] ^= blk[i];
+    for (int i = 0; i < 16; i++)
+      mac[i] ^= blk[i];
     aes128_encrypt_block(key, mac, mac);
   }
 
@@ -217,7 +242,8 @@ inline bool aes128_ccm_encrypt(const uint8_t key[16], const uint8_t *nonce, size
   // Encrypt tag: S_0 = E(K, A_0)
   uint8_t s0[16];
   aes128_encrypt_block(key, ctr, s0);
-  for (size_t i = 0; i < tag_len; i++) tag[i] = mac[i] ^ s0[i];
+  for (size_t i = 0; i < tag_len; i++)
+    tag[i] = mac[i] ^ s0[i];
 
   // Encrypt plaintext: A_i for i=1,2,...
   offset = 0;
@@ -229,7 +255,8 @@ inline bool aes128_ccm_encrypt(const uint8_t key[16], const uint8_t *nonce, size
     aes128_encrypt_block(key, ctr, keystream);
     size_t remain = plaintext_len - offset;
     size_t take = (remain < 16) ? remain : 16;
-    for (size_t i = 0; i < take; i++) out[offset + i] = plaintext[offset + i] ^ keystream[i];
+    for (size_t i = 0; i < take; i++)
+      out[offset + i] = plaintext[offset + i] ^ keystream[i];
     offset += take;
     ctr_val++;
   }
@@ -239,10 +266,11 @@ inline bool aes128_ccm_encrypt(const uint8_t key[16], const uint8_t *nonce, size
 
 /// AES-128-CCM decrypt + verify (reference, for host tests).
 /// Returns true if MIC verifies. `out` receives plaintext.
-inline bool aes128_ccm_decrypt(const uint8_t key[16], const uint8_t *nonce, size_t nonce_len,
-                               const uint8_t *aad, size_t aad_len, const uint8_t *ciphertext,
-                               size_t ciphertext_len, uint8_t *out, const uint8_t *tag, size_t tag_len) {
-  if (nonce_len != 13 || tag_len != 4) return false;
+inline bool aes128_ccm_decrypt(const uint8_t key[16], const uint8_t *nonce, size_t nonce_len, const uint8_t *aad,
+                               size_t aad_len, const uint8_t *ciphertext, size_t ciphertext_len, uint8_t *out,
+                               const uint8_t *tag, size_t tag_len) {
+  if (nonce_len != 13 || tag_len != DATA_AUTH_TAG_SIZE)
+    return false;
 
   const uint8_t q = 2;
 
@@ -261,7 +289,8 @@ inline bool aes128_ccm_decrypt(const uint8_t key[16], const uint8_t *nonce, size
     aes128_encrypt_block(key, ctr, keystream);
     size_t remain = ciphertext_len - offset;
     size_t take = (remain < 16) ? remain : 16;
-    for (size_t i = 0; i < take; i++) out[offset + i] = ciphertext[offset + i] ^ keystream[i];
+    for (size_t i = 0; i < take; i++)
+      out[offset + i] = ciphertext[offset + i] ^ keystream[i];
     offset += take;
     ctr_val++;
   }
@@ -285,7 +314,8 @@ inline bool aes128_ccm_decrypt(const uint8_t key[16], const uint8_t *nonce, size
     size_t copy_now = (aad_len < space) ? aad_len : space;
     memcpy(aad_block + 2, aad, copy_now);
     aad_copied = copy_now;
-    for (int i = 0; i < 16; i++) mac[i] ^= aad_block[i];
+    for (int i = 0; i < 16; i++)
+      mac[i] ^= aad_block[i];
     aes128_encrypt_block(key, mac, mac);
 
     while (aad_copied < aad_len) {
@@ -294,7 +324,8 @@ inline bool aes128_ccm_decrypt(const uint8_t key[16], const uint8_t *nonce, size
       size_t take = (remain < 16) ? remain : 16;
       memcpy(blk, aad + aad_copied, take);
       aad_copied += take;
-      for (int i = 0; i < 16; i++) mac[i] ^= blk[i];
+      for (int i = 0; i < 16; i++)
+        mac[i] ^= blk[i];
       aes128_encrypt_block(key, mac, mac);
     }
   }
@@ -307,7 +338,8 @@ inline bool aes128_ccm_decrypt(const uint8_t key[16], const uint8_t *nonce, size
     size_t take = (remain < 16) ? remain : 16;
     memcpy(blk, out + offset, take);
     offset += take;
-    for (int i = 0; i < 16; i++) mac[i] ^= blk[i];
+    for (int i = 0; i < 16; i++)
+      mac[i] ^= blk[i];
     aes128_encrypt_block(key, mac, mac);
   }
 
@@ -318,12 +350,14 @@ inline bool aes128_ccm_decrypt(const uint8_t key[16], const uint8_t *nonce, size
   aes128_encrypt_block(key, ctr, s0);
 
   // Compute expected tag
-  uint8_t expected_tag[4];
-  for (size_t i = 0; i < tag_len; i++) expected_tag[i] = mac[i] ^ s0[i];
+  uint8_t expected_tag[DATA_AUTH_TAG_SIZE];
+  for (size_t i = 0; i < tag_len; i++)
+    expected_tag[i] = mac[i] ^ s0[i];
 
   // Constant-time compare
   uint8_t diff = 0;
-  for (size_t i = 0; i < tag_len; i++) diff |= expected_tag[i] ^ tag[i];
+  for (size_t i = 0; i < tag_len; i++)
+    diff |= expected_tag[i] ^ tag[i];
 
   if (diff != 0) {
     // MIC failed — clear output
@@ -335,43 +369,72 @@ inline bool aes128_ccm_decrypt(const uint8_t key[16], const uint8_t *nonce, size
 
 }  // namespace detail
 
+inline uint32_t derive_fabric_id(const uint8_t key[FABRIC_KEY_SIZE]) {
+  uint8_t tag[DATA_AUTH_TAG_SIZE];
+  uint8_t unused = 0;
+  detail::aes128_ccm_encrypt(key, FABRIC_ID_DERIVATION_NONCE, sizeof(FABRIC_ID_DERIVATION_NONCE),
+                             FABRIC_ID_DERIVATION_AAD, sizeof(FABRIC_ID_DERIVATION_AAD), &unused, 0, &unused, tag,
+                             sizeof(tag));
+  return static_cast<uint32_t>(tag[0]) | (static_cast<uint32_t>(tag[1]) << 8) | (static_cast<uint32_t>(tag[2]) << 16) |
+         (static_cast<uint32_t>(tag[3]) << 24);
+}
+
 /// Encrypt plaintext payload in-place for a DATA packet.
 /// `payload` is input plaintext; on success, `out` contains ciphertext (same length as plaintext)
-/// and `mic` contains the 4-byte MIC.
+/// and `tag` contains the eight-byte authentication tag.
 /// Returns true on success.
-inline bool mesh_encrypt_payload(const uint8_t key[GROUP_KEY_SIZE], uint32_t src_id, uint32_t dst_id,
+inline bool mesh_encrypt_payload(const uint8_t key[FABRIC_KEY_SIZE], uint32_t src_id, uint32_t dst_id,
                                  uint32_t frame_counter, uint8_t pkt_type, uint8_t payload_len,
-                                 const uint8_t *plaintext, uint8_t *ciphertext, uint8_t mic[MIC_SIZE]) {
+                                 const uint8_t *plaintext, uint8_t *ciphertext, uint8_t tag[DATA_AUTH_TAG_SIZE]) {
   uint8_t nonce[CCM_NONCE_SIZE];
   uint8_t aad[CCM_AAD_SIZE];
   build_ccm_nonce(nonce, src_id, dst_id, frame_counter);
   build_ccm_aad(aad, pkt_type, src_id, dst_id, frame_counter, payload_len);
   return detail::aes128_ccm_encrypt(key, nonce, CCM_NONCE_SIZE, aad, CCM_AAD_SIZE, plaintext, payload_len, ciphertext,
-                                    mic, MIC_SIZE);
+                                    tag, DATA_AUTH_TAG_SIZE);
 }
 
 /// Decrypt and verify a DATA packet payload.
-/// `ciphertext` is the encrypted payload; `mic` is the 4-byte MIC from the wire.
+/// `ciphertext` is the encrypted payload; `tag` is the eight-byte tag from the wire.
 /// On success, `plaintext` contains the decrypted payload.
-/// Returns true if MIC verifies (packet is authentic).
-inline bool mesh_decrypt_payload(const uint8_t key[GROUP_KEY_SIZE], uint32_t src_id, uint32_t dst_id,
+/// Returns true if the tag verifies (packet is authentic).
+inline bool mesh_decrypt_payload(const uint8_t key[FABRIC_KEY_SIZE], uint32_t src_id, uint32_t dst_id,
                                  uint32_t frame_counter, uint8_t pkt_type, uint8_t payload_len,
-                                 const uint8_t *ciphertext, uint8_t *plaintext, const uint8_t *mic) {
+                                 const uint8_t *ciphertext, uint8_t *plaintext, const uint8_t *tag) {
   uint8_t nonce[CCM_NONCE_SIZE];
   uint8_t aad[CCM_AAD_SIZE];
   build_ccm_nonce(nonce, src_id, dst_id, frame_counter);
   build_ccm_aad(aad, pkt_type, src_id, dst_id, frame_counter, payload_len);
   return detail::aes128_ccm_decrypt(key, nonce, CCM_NONCE_SIZE, aad, CCM_AAD_SIZE, ciphertext, payload_len, plaintext,
-                                    mic, MIC_SIZE);
+                                    tag, DATA_AUTH_TAG_SIZE);
 }
 
 #else  // Embedded target — use mbedtls
 
 #include "mbedtls/ccm.h"
 
-inline bool mesh_encrypt_payload(const uint8_t key[GROUP_KEY_SIZE], uint32_t src_id, uint32_t dst_id,
+inline uint32_t derive_fabric_id(const uint8_t key[FABRIC_KEY_SIZE]) {
+  mbedtls_ccm_context ctx;
+  mbedtls_ccm_init(&ctx);
+  uint8_t tag[DATA_AUTH_TAG_SIZE];
+  uint8_t unused = 0;
+  int ret = mbedtls_ccm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 128);
+  if (ret == 0) {
+    ret = mbedtls_ccm_encrypt_and_tag(&ctx, 0, FABRIC_ID_DERIVATION_NONCE, sizeof(FABRIC_ID_DERIVATION_NONCE),
+                                      FABRIC_ID_DERIVATION_AAD, sizeof(FABRIC_ID_DERIVATION_AAD), &unused, &unused, tag,
+                                      sizeof(tag));
+  }
+  mbedtls_ccm_free(&ctx);
+  if (ret != 0) {
+    return 0;
+  }
+  return static_cast<uint32_t>(tag[0]) | (static_cast<uint32_t>(tag[1]) << 8) | (static_cast<uint32_t>(tag[2]) << 16) |
+         (static_cast<uint32_t>(tag[3]) << 24);
+}
+
+inline bool mesh_encrypt_payload(const uint8_t key[FABRIC_KEY_SIZE], uint32_t src_id, uint32_t dst_id,
                                  uint32_t frame_counter, uint8_t pkt_type, uint8_t payload_len,
-                                 const uint8_t *plaintext, uint8_t *ciphertext, uint8_t mic[MIC_SIZE]) {
+                                 const uint8_t *plaintext, uint8_t *ciphertext, uint8_t tag[DATA_AUTH_TAG_SIZE]) {
   uint8_t nonce[CCM_NONCE_SIZE];
   uint8_t aad[CCM_AAD_SIZE];
   build_ccm_nonce(nonce, src_id, dst_id, frame_counter);
@@ -385,14 +448,14 @@ inline bool mesh_encrypt_payload(const uint8_t key[GROUP_KEY_SIZE], uint32_t src
     return false;
   }
   ret = mbedtls_ccm_encrypt_and_tag(&ctx, payload_len, nonce, CCM_NONCE_SIZE, aad, CCM_AAD_SIZE, plaintext, ciphertext,
-                                    mic, MIC_SIZE);
+                                    tag, DATA_AUTH_TAG_SIZE);
   mbedtls_ccm_free(&ctx);
   return ret == 0;
 }
 
-inline bool mesh_decrypt_payload(const uint8_t key[GROUP_KEY_SIZE], uint32_t src_id, uint32_t dst_id,
+inline bool mesh_decrypt_payload(const uint8_t key[FABRIC_KEY_SIZE], uint32_t src_id, uint32_t dst_id,
                                  uint32_t frame_counter, uint8_t pkt_type, uint8_t payload_len,
-                                 const uint8_t *ciphertext, uint8_t *plaintext, const uint8_t *mic) {
+                                 const uint8_t *ciphertext, uint8_t *plaintext, const uint8_t *tag) {
   uint8_t nonce[CCM_NONCE_SIZE];
   uint8_t aad[CCM_AAD_SIZE];
   build_ccm_nonce(nonce, src_id, dst_id, frame_counter);
@@ -406,7 +469,7 @@ inline bool mesh_decrypt_payload(const uint8_t key[GROUP_KEY_SIZE], uint32_t src
     return false;
   }
   ret = mbedtls_ccm_auth_decrypt(&ctx, payload_len, nonce, CCM_NONCE_SIZE, aad, CCM_AAD_SIZE, ciphertext, plaintext,
-                                 mic, MIC_SIZE);
+                                 tag, DATA_AUTH_TAG_SIZE);
   mbedtls_ccm_free(&ctx);
   return ret == 0;
 }

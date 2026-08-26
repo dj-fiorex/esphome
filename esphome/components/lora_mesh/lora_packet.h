@@ -17,7 +17,7 @@ using Packet = StaticVector<uint8_t, LORA_MAX_PACKET_SIZE>;
 // ───────────────────────────────────────────────────────────────────────────
 
 /** Wire protocol version carried in every HELLO body (bumped when the wire format changes). */
-static constexpr uint8_t MESH_PROTO_VERSION = 3;
+static constexpr uint8_t MESH_PROTO_VERSION = 4;
 
 /** Maximum length of the human-readable node name carried in HELLO packets. */
 static constexpr size_t MESH_NODE_NAME_MAX_LEN = 32;
@@ -28,11 +28,14 @@ static constexpr uint32_t MESH_BROADCAST_ID = 0xFFFFFFFF;
 /** Minimum packet size = fixed 28-byte header. */
 static constexpr size_t MESH_HEADER_SIZE = 28;
 
+/** Maximum application DATA payload: 255-byte frame - header - length - eight-byte tag. */
+static constexpr size_t MESH_MAX_DATA_PAYLOAD_SIZE = 218;
+
 // ───────────────────────────────────────────────────────────────────────────
 // Header byte offsets (all fields are little-endian) — docs/wire-format.md §2
 // ───────────────────────────────────────────────────────────────────────────
 //
-//  0  [4]  fabric_id      – FNV-1a of the (non-secret) fabric name; relay gate only
+//  0  [4]  fabric_id      – public ID cryptographically derived from the Fabric Key
 //  4  [1]  pkt_type       – see PacketType enum
 //  5  [1]  flags          – see PacketFlags
 //  6  [4]  src_id         – FNV-1a(node_id string) or FNV-1a(MAC bytes), immutable end-to-end

@@ -12,8 +12,8 @@ lora_mesh:
   id: mesh
   radio_id: test_radio
   node_id: !lambda 'return std::string("test-001");'
-  mesh_secret: "my_mesh_secret"
-  group_key: "0123456789abcdef0123456789abcdef"
+  # Deterministic test-only key; production configurations should use !secret.
+  fabric_key: "00000000000000000000000000000000"
   gateway: normal
   max_hops: 8
   discovery_interval: 30s
@@ -67,10 +67,3 @@ button:
       - lora_mesh.send_to_gateway:
           id: mesh
           payload: !lambda 'return std::string("value=42");'
-
-  - platform: template
-    name: "Set group key"
-    on_press:
-      - lora_mesh.set_group_key:
-          id: mesh
-          key: "abcdef0123456789abcdef0123456789"

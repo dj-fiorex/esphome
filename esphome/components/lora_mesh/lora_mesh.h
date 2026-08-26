@@ -38,6 +38,8 @@ namespace esphome::lora_mesh {
 
 class LoraMesh : public Component {
  public:
+  explicit LoraMesh(const std::string &fabric_key_hex);
+
   // ── Component lifecycle ──────────────────────────────────────────────────
   void setup() override;
   void loop() override;
@@ -50,13 +52,6 @@ class LoraMesh : public Component {
     this->node_id_template_ = node_id;
     this->has_node_id_ = true;
   }
-  void set_mesh_secret(const std::string &secret) { this->mesh_secret_ = secret; }
-  /** Set the group key at runtime; persisted to NVS. Pass empty/nullptr to unprovision. */
-  void set_group_key(const uint8_t *key, size_t len);
-  /** Overload accepting a hex string (32 hex chars = 16 bytes). */
-  void set_group_key_hex(const std::string &hex_key);
-  /** Returns true if this node holds a valid group key (provisioned). */
-  bool is_provisioned() const { return this->has_group_key_; }
   void set_gateway_mode(GatewayMode mode) { this->gateway_mode_ = mode; }
   void set_max_hops(uint8_t max_hops) { this->max_hops_ = max_hops; }
   void set_discovery_interval(uint32_t ms) { this->discovery_interval_ms_ = ms; }
@@ -189,10 +184,6 @@ class LoraMesh : public Component {
   void persist_frame_counter_();
   void load_frame_counter_();
 
-  // ── Group key persistence ─────────────────────────────────────────────
-  void persist_group_key_();
-  void load_group_key_();
-
   // ── Replay protection ─────────────────────────────────────────────────
   /** Check frame_counter against per-source high-water mark; returns true if replay. */
   bool is_replay_(uint32_t src_id, uint32_t frame_counter);
@@ -206,7 +197,8 @@ class LoraMesh : public Component {
   std::string node_id_str_;
   TemplatableValue<std::string> node_id_template_;
   bool has_node_id_{false};
-  std::string mesh_secret_;
+  std::array<uint8_t, FABRIC_KEY_SIZE> fabric_key_{};
+  bool fabric_key_valid_{false};
   GatewayMode gateway_mode_{GatewayMode::NORMAL};
   bool acting_as_gateway_{false};
   bool last_gateway_available_{false};
@@ -220,10 +212,6 @@ class LoraMesh : public Component {
   uint32_t last_expire_check_{0};
   uint32_t last_diag_publish_{0};
 
-  // ── Group key (per-Group security layer) ──────────────────────────────
-  uint8_t group_key_[GROUP_KEY_SIZE]{};
-  bool has_group_key_{false};
-
   // ── Frame counter persistence (batched NVS writes) ────────────────────
   // We persist frame_counter_ in batches: on boot we load the persisted value
   // (which was written ahead by FRAME_COUNTER_BATCH) and set our counter to
@@ -231,7 +219,6 @@ class LoraMesh : public Component {
   static constexpr uint32_t FRAME_COUNTER_BATCH = 1000;
   uint32_t frame_counter_persist_threshold_{0};  // write NVS when frame_counter_ >= this
   ESPPreferenceObject frame_counter_pref_{};
-  ESPPreferenceObject group_key_pref_{};
 
   // ── Replay protection (per-source high-water marks) ───────────────────
   struct ReplayEntry {

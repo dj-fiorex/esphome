@@ -18,15 +18,49 @@ static const char *const TAG = "lora_mesh";
 
 // NVS key prefixes for preference hashes.
 static const char *const NVS_PREFIX_FRAME_COUNTER = "lora_mesh_fc_";
-static const char *const NVS_PREFIX_GROUP_KEY = "lora_mesh_gk_";
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
 
 void LoraMesh::id_to_hex(uint32_t id, char out[9]) { snprintf(out, 9, "%08" PRIX32, id); }
 
+LoraMesh::LoraMesh(const std::string &fabric_key_hex) {
+  if (fabric_key_hex.size() != FABRIC_KEY_SIZE * 2) {
+    return;
+  }
+  for (size_t i = 0; i < FABRIC_KEY_SIZE; i++) {
+    auto hex_value = [](char value) -> int {
+      if (value >= '0' && value <= '9') {
+        return value - '0';
+      }
+      if (value >= 'a' && value <= 'f') {
+        return value - 'a' + 10;
+      }
+      if (value >= 'A' && value <= 'F') {
+        return value - 'A' + 10;
+      }
+      return -1;
+    };
+    int high = hex_value(fabric_key_hex[i * 2]);
+    int low = hex_value(fabric_key_hex[i * 2 + 1]);
+    if (high < 0 || low < 0) {
+      this->fabric_key_.fill(0);
+      return;
+    }
+    this->fabric_key_[i] = static_cast<uint8_t>((high << 4) | low);
+  }
+  this->fabric_key_valid_ = true;
+  this->fabric_id_ = derive_fabric_id(this->fabric_key_.data());
+}
+
 // ─── Component lifecycle ──────────────────────────────────────────────────────
 
 void LoraMesh::setup() {
+  if (!this->fabric_key_valid_) {
+    ESP_LOGE(TAG, "Invalid Fabric Key — marking failed");
+    this->mark_failed();
+    return;
+  }
+
   // Derive numeric IDs from strings.
   if (this->has_node_id_) {
     this->node_id_str_ = this->node_id_template_.value();
@@ -39,8 +73,6 @@ void LoraMesh::setup() {
     snprintf(buf, sizeof(buf), "%06" PRIX32, this->node_id_ & 0xFFFFFFu);
     this->node_id_str_ = buf;
   }
-  this->fabric_id_ = fnv1a_str(this->mesh_secret_);
-
   // Initialise arrays.
   for (auto &r : this->routes_) {
     r = RouteEntry{};
@@ -55,21 +87,6 @@ void LoraMesh::setup() {
     rc = ReplayEntry{};
   }
 
-  // Load persisted group key and frame counter from NVS.
-  // If codegen already set a key (before setup, when node_id_str_ was empty and
-  // persist wrote under the wrong hash), save it so we can fall back to it.
-  bool had_codegen_key = this->has_group_key_;
-  uint8_t codegen_key[GROUP_KEY_SIZE];
-  if (had_codegen_key) {
-    memcpy(codegen_key, this->group_key_, GROUP_KEY_SIZE);
-  }
-  this->load_group_key_();
-  // If NVS had nothing but codegen provided a key, apply it and persist properly.
-  if (!this->has_group_key_ && had_codegen_key) {
-    memcpy(this->group_key_, codegen_key, GROUP_KEY_SIZE);
-    this->has_group_key_ = true;
-    this->persist_group_key_();
-  }
   this->load_frame_counter_();
 
   if (this->radio_ == nullptr) {
@@ -90,9 +107,8 @@ void LoraMesh::setup() {
   uint32_t jitter_ms = static_cast<uint32_t>(random_uint32() % (this->discovery_interval_ms_ / 5));
   this->last_hello_ = millis() - this->discovery_interval_ms_ + jitter_ms;
 
-  ESP_LOGI(TAG, "LoraMesh setup: node_id=%s (0x%08" PRIX32 ") fabric_id=0x%08" PRIX32 " gw=%s provisioned=%s",
-           this->node_id_str_.c_str(), this->node_id_, this->fabric_id_, this->acting_as_gateway_ ? "yes" : "no",
-           this->has_group_key_ ? "yes" : "no");
+  ESP_LOGI(TAG, "LoraMesh setup: node_id=%s (0x%08" PRIX32 ") fabric_id=0x%08" PRIX32 " gw=%s",
+           this->node_id_str_.c_str(), this->node_id_, this->fabric_id_, this->acting_as_gateway_ ? "yes" : "no");
 }
 
 void LoraMesh::loop() {
@@ -370,9 +386,6 @@ void LoraMesh::on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, f
 
 void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset, uint32_t src_id, bool src_is_gateway,
                               uint32_t prev_hop, float rssi, float snr) {
-  // Always create/update a direct route to the sender.
-  this->update_route_(src_id, src_id, 1, src_is_gateway, rssi, snr);
-
   if (pkt_len < offset + HELLO_FIXED_SIZE) {
     return;
   }
@@ -383,6 +396,9 @@ void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset,
              MESH_PROTO_VERSION);
     return;
   }
+
+  // A packet from another protocol version must not change mesh state.
+  this->update_route_(src_id, src_id, 1, src_is_gateway, rssi, snr);
 
   uint8_t name_len = pkt[offset + 1];
 
@@ -435,61 +451,51 @@ void LoraMesh::process_data_(const uint8_t *pkt, size_t pkt_len, size_t offset, 
   bool is_for_us = is_broadcast || (dst_id == this->node_id_);
 
   if (is_for_us) {
-    // Only attempt decryption if we hold a group key (provisioned).
-    if (!this->has_group_key_) {
-      ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " dropped (unprovisioned)", src_id);
-      // Fall through to forwarding below (unprovisioned relays still forward).
+    if (pkt_len < offset + 1) {
+      return;
+    }
+    uint8_t payload_len = pkt[offset];
+    size_t payload_start = offset + 1;
+    if (payload_len > MESH_MAX_DATA_PAYLOAD_SIZE || pkt_len < payload_start + payload_len + DATA_AUTH_TAG_SIZE) {
+      return;
+    }
+
+    const uint8_t *ciphertext = pkt + payload_start;
+    const uint8_t *tag = pkt + payload_start + payload_len;
+
+    uint8_t plaintext[MESH_MAX_DATA_PAYLOAD_SIZE];
+    bool tag_ok = mesh_decrypt_payload(this->fabric_key_.data(), src_id, dst_id, frame_counter,
+                                       static_cast<uint8_t>(PacketType::DATA), payload_len, ciphertext, plaintext, tag);
+    if (!tag_ok) {
+      ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " authentication failed, dropped", src_id);
     } else {
-      if (pkt_len < offset + 1) {
+      // Authenticate before replay handling so unauthenticated counters cannot
+      // advance the receiver high-water mark.
+      if (this->is_replay_(src_id, frame_counter)) {
+        ESP_LOGW(TAG, "DATA from 0x%08" PRIX32 " frame=%" PRIu32 " replay rejected", src_id, frame_counter);
         return;
       }
-      uint8_t payload_len = pkt[offset];
-      size_t payload_start = offset + 1;
-      // Encrypted DATA body: payload_len bytes of ciphertext + 4-byte MIC.
-      if (pkt_len < payload_start + payload_len + MIC_SIZE) {
-        return;
+      this->update_replay_counter_(src_id, frame_counter);
+
+      MeshMessage msg;
+      id_to_hex(src_id, msg.source);
+      const char *src_name = this->lookup_node_name_(src_id);
+      if (src_name != nullptr) {
+        snprintf(msg.source_name, sizeof(msg.source_name), "%s", src_name);
       }
+      id_to_hex(dst_id, msg.destination);
+      id_to_hex(prev_hop, msg.prev_hop);
+      msg.payload.assign(reinterpret_cast<const char *>(plaintext), payload_len);
+      msg.frame_counter = frame_counter;
+      msg.hop_count = hop_count;
+      msg.ttl = ttl;
+      msg.rssi = rssi;
+      msg.snr = snr;
+      msg.is_broadcast = is_broadcast;
+      msg.is_for_this_node = !is_broadcast;
 
-      const uint8_t *ciphertext = pkt + payload_start;
-      const uint8_t *mic = pkt + payload_start + payload_len;
-
-      // Decrypt and verify MIC.
-      uint8_t plaintext[226];  // max payload
-      bool mic_ok = mesh_decrypt_payload(this->group_key_, src_id, dst_id, frame_counter,
-                                         static_cast<uint8_t>(PacketType::DATA), payload_len, ciphertext, plaintext,
-                                         mic);
-      if (!mic_ok) {
-        ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " MIC failed (not our group), dropped", src_id);
-        // MIC fail → not our group. Still forward if applicable.
-      } else {
-        // MIC passed. Now check replay (verify MIC first, then reject replay).
-        if (this->is_replay_(src_id, frame_counter)) {
-          ESP_LOGW(TAG, "DATA from 0x%08" PRIX32 " frame=%" PRIu32 " replay rejected", src_id, frame_counter);
-          // Replay → do not deliver, do not forward.
-          return;
-        }
-        this->update_replay_counter_(src_id, frame_counter);
-
-        MeshMessage msg;
-        id_to_hex(src_id, msg.source);
-        const char *src_name = this->lookup_node_name_(src_id);
-        if (src_name != nullptr) {
-          snprintf(msg.source_name, sizeof(msg.source_name), "%s", src_name);
-        }
-        id_to_hex(dst_id, msg.destination);
-        id_to_hex(prev_hop, msg.prev_hop);
-        msg.payload.assign(reinterpret_cast<const char *>(plaintext), payload_len);
-        msg.frame_counter = frame_counter;
-        msg.hop_count = hop_count;
-        msg.ttl = ttl;
-        msg.rssi = rssi;
-        msg.snr = snr;
-        msg.is_broadcast = is_broadcast;
-        msg.is_for_this_node = !is_broadcast;
-
-        ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " hops=%u len=%u", src_id, hop_count, payload_len);
-        this->message_callback_(msg);
-      }
+      ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " hops=%u len=%u", src_id, hop_count, payload_len);
+      this->message_callback_(msg);
     }
   }
 
@@ -607,35 +613,22 @@ Packet LoraMesh::build_data_packet_(uint32_t dst_id, uint32_t next_hop, const st
     flags |= FLAG_IS_BROADCAST;
   }
   uint32_t fc = this->next_frame_counter_();
-  auto pkt = this->build_header_(PacketType::DATA, flags, dst_id, fc, this->max_hops_, 0,
-                                 this->node_id_, next_hop);
-  // Budget = radio frame limit minus header, payload_len byte, and MIC.
+  auto pkt = this->build_header_(PacketType::DATA, flags, dst_id, fc, this->max_hops_, 0, this->node_id_, next_hop);
+  // Budget = radio frame limit minus header, payload_len byte, and authentication tag.
   size_t max_pkt = (this->radio_ != nullptr) ? this->radio_->get_max_packet_size() : LORA_MAX_PACKET_SIZE;
   max_pkt = std::min(max_pkt, LORA_MAX_PACKET_SIZE);
-  size_t len = std::min(payload.size(), max_pkt - MESH_HEADER_SIZE - 1 - MIC_SIZE);
+  size_t len = std::min(payload.size(), max_pkt - MESH_HEADER_SIZE - 1 - DATA_AUTH_TAG_SIZE);
   pkt.push_back(static_cast<uint8_t>(len));
 
-  if (this->has_group_key_) {
-    // Encrypt payload and append ciphertext + MIC.
-    uint8_t ciphertext[226];
-    uint8_t mic[MIC_SIZE];
-    mesh_encrypt_payload(this->group_key_, this->node_id_, dst_id, fc, static_cast<uint8_t>(PacketType::DATA),
-                         static_cast<uint8_t>(len), reinterpret_cast<const uint8_t *>(payload.data()), ciphertext, mic);
-    for (size_t i = 0; i < len; ++i) {
-      pkt.push_back(ciphertext[i]);
-    }
-    for (size_t i = 0; i < MIC_SIZE; ++i) {
-      pkt.push_back(mic[i]);
-    }
-  } else {
-    // Unprovisioned: send plaintext (no security — for bootstrapping/debug only).
-    for (size_t i = 0; i < len; ++i) {
-      pkt.push_back(static_cast<uint8_t>(payload[i]));
-    }
-    // Still append a zero MIC so the wire format is consistent.
-    for (size_t i = 0; i < MIC_SIZE; ++i) {
-      pkt.push_back(0);
-    }
+  uint8_t ciphertext[MESH_MAX_DATA_PAYLOAD_SIZE];
+  uint8_t tag[DATA_AUTH_TAG_SIZE];
+  mesh_encrypt_payload(this->fabric_key_.data(), this->node_id_, dst_id, fc, static_cast<uint8_t>(PacketType::DATA),
+                       static_cast<uint8_t>(len), reinterpret_cast<const uint8_t *>(payload.data()), ciphertext, tag);
+  for (size_t i = 0; i < len; ++i) {
+    pkt.push_back(ciphertext[i]);
+  }
+  for (size_t i = 0; i < DATA_AUTH_TAG_SIZE; ++i) {
+    pkt.push_back(tag[i]);
   }
   return pkt;
 }
@@ -944,48 +937,6 @@ void LoraMesh::publish_diagnostics_() {
 #endif
 }
 
-// ─── Group key management ─────────────────────────────────────────────────────
-
-void LoraMesh::set_group_key(const uint8_t *key, size_t len) {
-  if (key == nullptr || len == 0) {
-    this->has_group_key_ = false;
-    memset(this->group_key_, 0, GROUP_KEY_SIZE);
-    ESP_LOGI(TAG, "Group key cleared (unprovisioned)");
-  } else {
-    memcpy(this->group_key_, key, std::min(len, GROUP_KEY_SIZE));
-    if (len < GROUP_KEY_SIZE) {
-      memset(this->group_key_ + len, 0, GROUP_KEY_SIZE - len);
-    }
-    this->has_group_key_ = true;
-    ESP_LOGI(TAG, "Group key set (provisioned)");
-  }
-  this->persist_group_key_();
-}
-
-void LoraMesh::set_group_key_hex(const std::string &hex_key) {
-  if (hex_key.empty()) {
-    this->set_group_key(nullptr, 0);
-    return;
-  }
-  if (hex_key.size() != GROUP_KEY_SIZE * 2) {
-    ESP_LOGW(TAG, "set_group_key_hex: expected 32 hex chars, got %zu", hex_key.size());
-    return;
-  }
-  uint8_t key[GROUP_KEY_SIZE];
-  for (size_t i = 0; i < GROUP_KEY_SIZE; i++) {
-    char hi = hex_key[i * 2];
-    char lo = hex_key[i * 2 + 1];
-    auto hex_val = [](char c) -> uint8_t {
-      if (c >= '0' && c <= '9') return static_cast<uint8_t>(c - '0');
-      if (c >= 'a' && c <= 'f') return static_cast<uint8_t>(c - 'a' + 10);
-      if (c >= 'A' && c <= 'F') return static_cast<uint8_t>(c - 'A' + 10);
-      return 0;
-    };
-    key[i] = static_cast<uint8_t>((hex_val(hi) << 4) | hex_val(lo));
-  }
-  this->set_group_key(key, GROUP_KEY_SIZE);
-}
-
 // ─── Frame counter persistence ────────────────────────────────────────────────
 
 uint32_t LoraMesh::next_frame_counter_() {
@@ -1022,36 +973,6 @@ void LoraMesh::load_frame_counter_() {
   // Persist immediately so if we crash before the first batch completes,
   // next boot still has a safe-ahead value.
   this->persist_frame_counter_();
-}
-
-void LoraMesh::persist_group_key_() {
-  // Before setup(), node_id_str_ is empty — skip persist (setup will persist properly).
-  if (this->node_id_str_.empty()) {
-    return;
-  }
-  uint32_t hash = fnv1a_str(std::string(NVS_PREFIX_GROUP_KEY) + this->node_id_str_);
-  this->group_key_pref_ = global_preferences->make_preference<uint8_t[GROUP_KEY_SIZE + 1]>(hash, true);
-
-  // Store: 1-byte flag (has_key) + 16-byte key.
-  uint8_t buf[GROUP_KEY_SIZE + 1];
-  buf[0] = this->has_group_key_ ? 1 : 0;
-  memcpy(buf + 1, this->group_key_, GROUP_KEY_SIZE);
-  this->group_key_pref_.save(&buf);
-}
-
-void LoraMesh::load_group_key_() {
-  uint32_t hash = fnv1a_str(std::string(NVS_PREFIX_GROUP_KEY) + this->node_id_str_);
-  this->group_key_pref_ = global_preferences->make_preference<uint8_t[GROUP_KEY_SIZE + 1]>(hash, true);
-
-  uint8_t buf[GROUP_KEY_SIZE + 1];
-  if (this->group_key_pref_.load(&buf) && buf[0] == 1) {
-    memcpy(this->group_key_, buf + 1, GROUP_KEY_SIZE);
-    this->has_group_key_ = true;
-    ESP_LOGI(TAG, "Group key loaded from NVS (provisioned)");
-  } else {
-    this->has_group_key_ = false;
-    memset(this->group_key_, 0, GROUP_KEY_SIZE);
-  }
 }
 
 // ─── Replay protection ────────────────────────────────────────────────────────

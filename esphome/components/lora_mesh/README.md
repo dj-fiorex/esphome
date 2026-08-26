@@ -38,6 +38,7 @@
 - **Automatic neighbor discovery**: periodic HELLO beacons let nodes find each other without any manual topology configuration.
 - **Distance-vector routing**: each HELLO beacon advertises known routes, so remote nodes learn paths through neighbors.
 - **Duplicate suppression**: a ring-buffer seen-cache prevents the same packet being processed or forwarded more than once.
+- **One Fabric security boundary**: one mandatory build-time Fabric Key derives the public Fabric ID and protects every DATA payload with AES-128-CCM and an eight-byte tag.
 - **Gateway abstraction**: any node can act as a gateway (bridge to another network). Sensor nodes can send data to the "best" gateway without knowing which one it is.
 - **Three sending modes**: unicast to a named node, broadcast to all nodes, or unicast to the best available gateway.
 - **Automation-friendly**: `on_message`, `on_route_update`, and `on_gateway_changed` triggers integrate natively with ESPHome automations.
@@ -91,7 +92,7 @@
 
 ### Component Lifecycle
 
-1. **`setup()`** — Derives `node_id` (from config or MAC), computes the `fabric_id` from `mesh_secret`, initialises routing and seen-cache arrays, loads the group key and frame counter from NVS (or applies the YAML-configured key on first boot), registers with the radio adapter. Sends the first HELLO beacon after a random jitter to avoid channel collision when many devices boot simultaneously.
+1. **`setup()`** — Derives `node_id` (from config or MAC), uses the build-time Fabric Key and its derived public Fabric ID, initialises routing and seen-cache arrays, restores the persistent frame-counter reservation, and registers with the radio adapter. The first HELLO is sent after random jitter to avoid channel collision when many Nodes boot simultaneously.
 2. **`loop()`** — Periodically queues HELLO beacons, expires stale routes and seen-cache entries, publishes diagnostic sensors, and transmits **at most one** queued packet per iteration after a random `tx_jitter` backoff. This bounds the main-loop stall to one packet's airtime (the radio TX is blocking).
 3. **`on_radio_packet()`** — Called by the radio adapter whenever a packet arrives. Validates the fabric ID, suppresses duplicates, then dispatches to `process_hello_()` or `process_data_()`. Packets to forward are enqueued on the TX queue, never transmitted from inside the callback.
 
@@ -114,7 +115,7 @@
 1. **Wire the LoRa radio** to the ESP32 via SPI (CS, RST, BUSY (sx126x) or DIO0 (sx127x), and DIO1 pins).
 2. **Configure the radio component** (`sx126x` or `sx127x`) in your YAML, giving it an `id`.
 3. **Add `lora_mesh:`** to your YAML, referencing the radio via `radio_id`.
-4. **Choose a `mesh_secret`** — all nodes in the same mesh must share the same secret. Packets from a different secret are silently dropped.
+4. **Create a 128-bit `fabric_key` secret** — store 32 hexadecimal characters in ESPHome's `secrets.yaml`; all Nodes in one Fabric must use the same key.
 5. **Optionally set `node_id`** — a human-readable name used to address this node. If omitted, a short hex string derived from the last 3 bytes of the MAC address is used.
 6. **Flash all nodes** and observe logs for `HELLO sent` and `HELLO from …` messages.
 
@@ -129,8 +130,7 @@ lora_mesh:
   id: mesh                      # ESPHome object ID (optional, auto-generated)
   radio_id: my_radio            # (Required) ID of the sx126x or sx127x component
   node_id: "sensor-01"          # (Optional) Human-readable node name
-  mesh_secret: "my_secret"      # (Required) Shared passphrase — all nodes must match
-  group_key: "0123456789abcdef0123456789abcdef"  # (Optional) 16-byte AES key as 32 hex chars
+  fabric_key: !secret lora_mesh_fabric_key  # (Required) 32 hex chars / 128 bits
   gateway: normal               # (Optional) Gateway mode: normal | gateway | auto
 ```
 
@@ -138,8 +138,7 @@ lora_mesh:
 |-----|------|---------|-------------|
 | `radio_id` | component ID | — | **Required.** Must reference an `sx126x` or `sx127x` component. The type is detected automatically at code-generation time. |
 | `node_id` | templatable string | MAC-derived | Human-readable name for this node. Used as the address when other nodes call `lora_mesh.send`. Supports `!lambda`. If omitted, a 6-character hex string derived from the last 3 bytes of the Wi-Fi MAC is used. |
-| `mesh_secret` | string | — | **Required.** Shared fabric name for the mesh. FNV-1a hashed to a 32-bit `fabric_id` embedded in every packet. Nodes with a different value ignore each other's traffic. It is a relay gate, not encryption. |
-| `group_key` | string (32 hex chars) | — | **Optional.** 128-bit AES group key for DATA payload encryption (AES-128-CCM with 4-byte MIC). All nodes that should communicate must share the same key. Unprovisioned nodes (no key) still relay encrypted packets but never deliver them to `on_message`. Can also be set at runtime via `lora_mesh.set_group_key`. Persisted to NVS. |
+| `fabric_key` | string (32 hex chars) | — | **Required.** The sole 128-bit Fabric secret. It deterministically derives the public 32-bit Fabric ID and authenticates-encrypts every DATA payload with AES-128-CCM. Put it in `secrets.yaml` and reference it with `!secret`; the component has no plaintext or runtime provisioning mode. |
 | `gateway` | enum | `normal` | Controls whether this node announces itself as a gateway. See [Gateway Modes](#gateway-modes). |
 
 ### Routing Options
@@ -275,7 +274,7 @@ Send a unicast message to a named node. Returns `false` (and logs a warning) if 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `destination` | templatable string | Node ID string of the target. Must match the `node_id` configured on the destination device. |
-| `payload` | templatable string | Application data. Maximum 255 bytes. |
+| `payload` | templatable string | Application data. Maximum 218 bytes. |
 
 ### `lora_mesh.broadcast`
 
@@ -289,7 +288,7 @@ Broadcast a message to all nodes in the mesh. All nodes that receive it (directl
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `payload` | templatable string | Application data. Maximum 255 bytes. |
+| `payload` | templatable string | Application data. Maximum 218 bytes. |
 
 ### `lora_mesh.send_to_gateway`
 
@@ -307,25 +306,7 @@ Send a unicast message to the best known gateway (fewest hops, then highest RSSI
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `payload` | templatable string | Application data. Maximum 255 bytes. |
-
-### `lora_mesh.set_group_key`
-
-Set (or clear) the AES-128 group key at runtime. The key is persisted to NVS and restored on next boot. Pass an empty string to clear the key (unprovision the node).
-
-```yaml
-- lora_mesh.set_group_key:
-    id: mesh
-    key: "abcdef0123456789abcdef0123456789"
-```
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `key` | string (32 hex chars) | The 128-bit group key as 32 hexadecimal characters. Pass `""` to clear. |
-
-> **Note:** An unprovisioned node (no group key) can still relay encrypted DATA packets for other nodes, but it will never decrypt them or fire `on_message`.
-
----
+| `payload` | templatable string | Application data. Maximum 218 bytes. |
 
 ## YAML Examples
 
@@ -350,7 +331,7 @@ lora_mesh:
   id: mesh
   radio_id: lora_radio
   node_id: "node-01"
-  mesh_secret: "my_secret_key"
+  fabric_key: !secret lora_mesh_fabric_key
 
   on_message:
     then:
@@ -367,7 +348,7 @@ lora_mesh:
   id: mesh
   radio_id: lora_radio
   node_id: "gateway-01"
-  mesh_secret: "my_secret_key"
+  fabric_key: !secret lora_mesh_fabric_key
   gateway: gateway              # Always announces itself as a gateway
 
   on_message:
@@ -390,7 +371,7 @@ lora_mesh:
   id: mesh
   radio_id: lora_radio
   node_id: "edge-01"
-  mesh_secret: "my_secret_key"
+  fabric_key: !secret lora_mesh_fabric_key
   gateway: auto                 # Gateway when Wi-Fi is up, normal node otherwise
 
   on_gateway_changed:
@@ -435,7 +416,7 @@ lora_mesh:
   id: mesh
   radio_id: lora_radio
   node_id: "sensor-barn"
-  mesh_secret: "farm_mesh_2025"
+  fabric_key: !secret lora_mesh_fabric_key
   gateway: normal
   max_hops: 6
   discovery_interval: 60s
@@ -547,13 +528,13 @@ on_press:
 
 ## Protocol Overview
 
-### Packet Header (28 bytes, little-endian — protocol version 3)
+### Packet Header (28 bytes, little-endian — protocol version 4)
 
 See [docs/wire-format.md](docs/wire-format.md) for the authoritative specification.
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
-| 0 | 4 | `fabric_id` | FNV-1a hash of `mesh_secret`. Packets with a mismatched fabric ID are silently dropped (relay gate only). |
+| 0 | 4 | `fabric_id` | Public ID cryptographically derived from the Fabric Key. Mismatches are dropped before processing. |
 | 4 | 1 | `pkt_type` | `1`=HELLO, `2`=DATA (others reserved for future use) |
 | 5 | 1 | `flags` | Bitmask: `0x01`=IS_GATEWAY, `0x02`=IS_BROADCAST, `0x04`=ACK_REQUESTED, `0x08`=IS_FORWARD |
 | 6 | 4 | `src_id` | FNV-1a hash of the originating node's ID string (immutable end-to-end) |
@@ -576,7 +557,7 @@ See [docs/wire-format.md](docs/wire-format.md) for the authoritative specificati
 ### HELLO Payload (after 28-byte header)
 
 ```
-[0]           proto_version  (1 byte) — always 3
+[0]           proto_version  (1 byte) — always 4
 [1]           name_len       (1 byte) — byte length of node_name, 0 if absent
 [2..2+N-1]    node_name      (N bytes, not NUL-terminated on wire)
 [2+N]         route_count    (1 byte) — number of route advertisements that follow
@@ -592,7 +573,8 @@ Routes are sorted by hop count ascending. The number of routes advertised is lim
 
 ```
 [0]     payload_len  (uint8_t)
-[1+]    raw payload bytes
+[1+]    ciphertext   (payload_len bytes, AES-128-CCM)
+[1+N]   tag          (8 bytes)
 ```
 
 ---
@@ -623,7 +605,7 @@ Routes are sorted by hop count ascending. The number of routes advertised is lim
 ## Limitations
 
 - **No acknowledgements or retransmission** — packet delivery is best-effort. Implement application-level acknowledgements if reliability is required.
-- **222-byte encrypted payload limit** — with `group_key` enabled, the DATA payload is limited to 222 bytes (226-byte raw limit minus 4-byte MIC). Without a group key, the raw limit of 226 bytes applies. Longer payloads are truncated.
+- **218-byte DATA payload limit** — every DATA payload is encrypted and authenticated; the 28-byte header, one-byte length, and eight-byte tag leave 218 application bytes. Longer payloads are truncated consistently before encryption.
 - **No source routing or on-demand route discovery** — routes must be learnt via HELLO beacons before unicast can succeed. If no route exists, `lora_mesh.send` fails immediately.
 - **No loop prevention beyond TTL** — in a poorly configured mesh with very short `route_ttl` or very long `discovery_interval`, routing loops could temporarily consume airtime. Proper parameter tuning avoids this.
 - **`max_routes` and `seen_cache_size` are compile-time constants** — changing them requires recompilation and reflashing.
@@ -636,7 +618,7 @@ Routes are sorted by hop count ascending. The number of routes advertised is lim
 
 ### No HELLO messages received from neighbors
 
-- Verify all nodes share exactly the same `mesh_secret`.
+- Verify all Nodes resolve exactly the same 32-character hexadecimal `fabric_key` secret.
 - Confirm the `sx126x`/`sx127x` frequency, bandwidth, spreading factor, and coding rate are identical across all devices.
 - Check that `rx_start: true` is set on the radio component so it starts listening immediately.
 - Increase log level to `DEBUG` and watch for `Fabric ID mismatch` messages.
