@@ -48,7 +48,7 @@ lora_mesh:
 | `node_id` | MAC-derived | Templatable human-readable Node ID. |
 | `max_hops` | `8` | Maximum new-packet TTL and accepted Route length. |
 | `discovery_interval` | `30s` | Periodic authenticated HELLO interval. |
-| `route_ttl` | `5min` | Route lease; abrupt loss is detected by ordinary Route expiry. |
+| `route_ttl` | `90s` | Route lease; the default detects abrupt loss after about three missed HELLOs. |
 | `max_routes` | `16` | Compile-time Route-table capacity. |
 | `seen_cache_size` | `32` | Compile-time duplicate Seen-cache capacity. |
 | `seen_cache_ttl` | `2min` | Duplicate Seen-cache lifetime. |
@@ -78,6 +78,20 @@ Or through the templatable ESPHome action:
 
 The action and C++ API share one transition path. Setting the existing value is a no-op. A real change schedules an
 authenticated HELLO; rapid changes are coalesced so they cannot enqueue an unbounded burst.
+
+## Gateway availability and failure detection
+
+A Node that learns a Gateway promotion or Gateway Withdrawal schedules the same coalesced HELLO update. Each hop can
+therefore propagate the final Gateway state after the one-second immediate-update rate limit, instead of waiting for
+the next 30-second periodic HELLO. Repeated Upstream Connectivity flapping keeps only a pending update during the
+rate-limit window, and the HELLO built when that window closes carries the final stable state. If one HELLO cannot fit
+every Route, changed Gateway Routes take priority and any overflow remains pending for later rate-limited HELLOs.
+Pending Gateway changes are not evicted to admit newly learned Routes before their update is advertised.
+
+A Gateway that loses power cannot send a Gateway Withdrawal. That case deliberately uses ordinary self-healing:
+neighbour and dependent Routes expire, then `send_to_gateway()` evaluates the remaining Routes and selects the current
+alternative. The default 30-second `discovery_interval` and 90-second `route_ttl` model roughly three missed HELLOs.
+There is no Gateway-specific heartbeat, probe, timeout, Route discovery exchange, payload persistence, or mesh retry.
 
 ## Sending
 

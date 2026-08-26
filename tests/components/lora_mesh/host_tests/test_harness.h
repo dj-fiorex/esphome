@@ -74,11 +74,12 @@ using esphome::lora_mesh::FABRIC_KEY_SIZE;
 class FakeRadio : public esphome::lora_mesh::LoRaRadio {
  public:
   void transmit_packet(const Packet &data) override { this->sent.emplace_back(data.begin(), data.end()); }
-  size_t get_max_packet_size() override { return 255; }
+  size_t get_max_packet_size() override { return this->max_packet_size; }
   void attach_listener(LoraMesh *mesh) override { this->listener = mesh; }
 
   std::vector<std::vector<uint8_t>> sent;
   LoraMesh *listener{nullptr};
+  size_t max_packet_size{255};
 };
 
 static constexpr const char *TEST_FABRIC_KEY_HEX = "0102030405060708090a0b0c0d0e0f10";

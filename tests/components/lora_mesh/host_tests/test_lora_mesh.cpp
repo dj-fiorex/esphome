@@ -23,6 +23,39 @@ static void advance_and_loop(TestNode &n, uint32_t ms) {
   n.mesh.loop();
 }
 
+static void expect_nearest_gateway(TestNode &node, uint32_t gateway_id) {
+  char gateway_hex[9];
+  snprintf(gateway_hex, sizeof(gateway_hex), "%08X", gateway_id);
+  EXPECT_TRUE(node.mesh.get_nearest_gateway() == gateway_hex);
+}
+
+static uint8_t hello_route_count(const std::vector<uint8_t> &hello) {
+  size_t route_count_offset = HDR + 2 + hello[HDR + 1];
+  return hello[route_count_offset];
+}
+
+static RouteAdv hello_route_at(const std::vector<uint8_t> &hello, size_t index) {
+  size_t route_count_offset = HDR + 2 + hello[HDR + 1];
+  size_t route_offset = route_count_offset + 1 + index * esphome::lora_mesh::ROUTE_ADV_SIZE;
+  return {
+      get_u32_le(&hello[route_offset + esphome::lora_mesh::ROUTE_ADV_OFF_DEST_ID]),
+      hello[route_offset + esphome::lora_mesh::ROUTE_ADV_OFF_HOP_COUNT],
+      static_cast<int8_t>(hello[route_offset + esphome::lora_mesh::ROUTE_ADV_OFF_PATH_RSSI]),
+      (hello[route_offset + esphome::lora_mesh::ROUTE_ADV_OFF_FLAGS] & esphome::lora_mesh::ROUTE_FLAG_IS_GATEWAY) != 0,
+  };
+}
+
+static bool hello_advertises_gateway_state(const std::vector<uint8_t> &hello, uint32_t destination_id,
+                                           bool is_gateway) {
+  for (size_t index = 0; index < hello_route_count(hello); ++index) {
+    RouteAdv route = hello_route_at(hello, index);
+    if (route.dest_id == destination_id && route.is_gateway == is_gateway) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void test_protocol_v4_derives_fabric_id_and_uses_eight_byte_data_tag() {
   TestNode a("node-a");
 
@@ -408,20 +441,21 @@ static void test_three_node_line_unicast_and_broadcast() {
 // ── Slice 7: route maintenance — refresh fix + passive healing (issue #11) ──
 
 static void test_multihop_route_lease_renewed_on_reconfirmation() {
-  TestNode a("node-a");
+  TestNode receiving_node("node-a");
+  receiving_node.mesh.set_route_ttl(300000);
 
-  // C via B, learned at t0. Default route_ttl is 300 s.
-  a.receive(make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 1, -70}}, 0, 1));
+  // C via B, learned at t0 under a 300-second test lease.
+  receiving_node.receive(make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 1, -70}}, 0, 1));
 
   // At t0+250s B re-confirms the same route at equal quality (same next hop,
   // same hop count) — this must renew the lease, not just on improvement.
-  advance_and_loop(a, 250000);
-  a.receive(make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 1, -70}}, 0, 2));
+  advance_and_loop(receiving_node, 250000);
+  receiving_node.receive(make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 1, -70}}, 0, 2));
 
   // t0+350s: past the original lease, within the renewed one.
-  advance_and_loop(a, 100000);
-  EXPECT_TRUE(a.mesh.has_route("node-b"));
-  EXPECT_TRUE(a.mesh.has_route("node-c"));  // pre-fix: expired despite re-confirmation
+  advance_and_loop(receiving_node, 100000);
+  EXPECT_TRUE(receiving_node.mesh.has_route("node-b"));
+  EXPECT_TRUE(receiving_node.mesh.has_route("node-c"));  // pre-fix: expired despite re-confirmation
 }
 
 static void test_dead_next_hop_invalidates_dependent_routes() {
@@ -693,6 +727,140 @@ static void test_three_node_gateway_discovery_and_delivery() {
   EXPECT_TRUE(c.received[0].payload == "soil=17");
 }
 
+// ── Gateway propagation and passive expiry (issue #22) ─────────────────
+
+static void test_gateway_promotion_and_withdrawal_propagate_promptly_and_select_alternative() {
+  TestNode offline_node("node-a"), forwarding_node("node-b"), primary_gateway("node-c"), alternative_gateway("node-d");
+
+  primary_gateway.mesh.set_upstream_connected(true);
+  advance_and_loop(primary_gateway, 1000);
+  alternative_gateway.mesh.set_upstream_connected(true);
+  advance_and_loop(alternative_gateway, 1000);
+
+  // B hears both Gateways directly. C has the stronger path and is selected.
+  forwarding_node.receive(primary_gateway.radio.sent[0], -50.0f);
+  forwarding_node.receive(alternative_gateway.radio.sent[0], -90.0f);
+  advance_and_loop(forwarding_node, 1000);
+
+  // A cannot hear either Gateway directly; B's prompt HELLO makes both
+  // selectable across the second LoRa hop without a periodic HELLO wait.
+  offline_node.receive(forwarding_node.radio.sent[0], -60.0f);
+  expect_nearest_gateway(offline_node, NODE_C);
+  offline_node.mesh.loop();  // propagate availability onward before the Withdrawal wave
+
+  primary_gateway.radio.sent.clear();
+  forwarding_node.radio.sent.clear();
+  offline_node.radio.sent.clear();
+
+  // C gracefully withdraws. B and then A each emit one rate-limited HELLO,
+  // clear C's stale eligibility, and keep D as the Nearest Gateway.
+  primary_gateway.mesh.set_upstream_connected(false);
+  primary_gateway.mesh.loop();
+  EXPECT_EQ(primary_gateway.radio.sent.size(), 1u);
+  forwarding_node.receive(primary_gateway.radio.sent[0], -50.0f);
+  advance_and_loop(forwarding_node, 1000);
+  EXPECT_EQ(forwarding_node.radio.sent.size(), 1u);
+  offline_node.receive(forwarding_node.radio.sent[0], -60.0f);
+  offline_node.mesh.loop();
+  EXPECT_EQ(offline_node.radio.sent.size(), 1u);
+
+  expect_nearest_gateway(offline_node, NODE_D);
+}
+
+static void test_gateway_change_is_included_when_hello_cannot_fit_every_route() {
+  TestNode forwarding_node("node-b");
+  forwarding_node.radio.max_packet_size = 52;  // node-b HELLO overhead plus exactly one Route
+
+  // The close non-Gateway route would normally win the hop-count ordering.
+  // The farther Gateway change must instead occupy the sole advertisement.
+  forwarding_node.receive(make_hello(FABRIC, NODE_C, "node-c", {{NODE_D, 2, -80, true}}, 0, 90), -60.0f);
+  advance_and_loop(forwarding_node, 1000);
+
+  const auto &availability_hello = forwarding_node.radio.sent[0];
+  EXPECT_EQ(hello_route_count(availability_hello), 1u);
+  EXPECT_TRUE(hello_advertises_gateway_state(availability_hello, NODE_D, true));
+
+  // The same bounded priority is required for the Gateway Withdrawal.
+  forwarding_node.radio.sent.clear();
+  forwarding_node.receive(make_hello(FABRIC, NODE_C, "node-c", {{NODE_D, 2, -80, false}}, 0, 91), -60.0f);
+  advance_and_loop(forwarding_node, 1000);
+
+  const auto &withdrawal_hello = forwarding_node.radio.sent[0];
+  EXPECT_EQ(hello_route_count(withdrawal_hello), 1u);
+  EXPECT_TRUE(hello_advertises_gateway_state(withdrawal_hello, NODE_D, false));
+}
+
+static void test_gateway_changes_over_hello_capacity_continue_in_bounded_updates() {
+  TestNode forwarding_node("node-b");
+  forwarding_node.radio.max_packet_size = 52;  // node-b HELLO overhead plus exactly one Route
+
+  forwarding_node.receive(
+      make_hello(FABRIC, NODE_C, "node-c", {{NODE_D, 1, -70, true}, {NODE_A, 2, -80, true}}, 0, 94));
+  advance_and_loop(forwarding_node, 1000);
+
+  const auto &first_hello = forwarding_node.radio.sent[0];
+  EXPECT_EQ(hello_route_count(first_hello), 1u);
+  EXPECT_TRUE(hello_advertises_gateway_state(first_hello, NODE_D, true));
+
+  // The unadvertised change remains pending for one later rate-limited HELLO.
+  forwarding_node.radio.sent.clear();
+  advance_and_loop(forwarding_node, 1000);
+  const auto &second_hello = forwarding_node.radio.sent[0];
+  EXPECT_EQ(hello_route_count(second_hello), 1u);
+  EXPECT_TRUE(hello_advertises_gateway_state(second_hello, NODE_A, true));
+
+  // Once every stable change has been advertised, no control burst continues.
+  forwarding_node.radio.sent.clear();
+  advance_and_loop(forwarding_node, 1000);
+  EXPECT_EQ(forwarding_node.radio.sent.size(), 0u);
+}
+
+static void test_pending_gateway_withdrawal_survives_route_table_pressure() {
+  TestNode forwarding_node("node-a");
+  constexpr uint32_t withdrawing_gateway_id = 0x0000100F;
+  std::vector<RouteAdv> advertised_routes;
+  for (uint32_t destination_id = 0x00001000; destination_id < 0x0000100E; ++destination_id) {
+    advertised_routes.push_back({destination_id, 1, -60, false});
+  }
+  advertised_routes.push_back({withdrawing_gateway_id, 7, -120, true});
+
+  // B plus its fifteen advertisements fill the default sixteen-Route table.
+  forwarding_node.receive(make_hello(FABRIC, NODE_B, "node-b", advertised_routes, 0, 95));
+  advance_and_loop(forwarding_node, 1000);
+  EXPECT_TRUE(hello_advertises_gateway_state(forwarding_node.radio.sent[0], withdrawing_gateway_id, true));
+
+  // Learn the Withdrawal, then pressure the full table with a new direct Node
+  // before the rate-limited HELLO can be built. The pending tombstone must not
+  // be the Route evicted to make room.
+  forwarding_node.radio.sent.clear();
+  advertised_routes.back().is_gateway = false;
+  forwarding_node.receive(make_hello(FABRIC, NODE_B, "node-b", advertised_routes, 0, 96));
+  forwarding_node.receive(make_hello(FABRIC, NODE_C, "node-c", {}, 0, 97));
+  advance_and_loop(forwarding_node, 1000);
+
+  EXPECT_EQ(forwarding_node.radio.sent.size(), 1u);
+  EXPECT_TRUE(hello_advertises_gateway_state(forwarding_node.radio.sent[0], withdrawing_gateway_id, false));
+}
+
+static void test_new_gateway_in_reused_route_slot_still_schedules_hello() {
+  TestNode forwarding_node("node-a");
+
+  forwarding_node.receive(make_hello(FABRIC, NODE_B, "node-b", {}, FLAG_GATEWAY, 92));
+  advance_and_loop(forwarding_node, 1000);
+  EXPECT_EQ(forwarding_node.radio.sent.size(), 1u);
+
+  // Reusing B's invalid slot for another Gateway must reset B's stale flags;
+  // otherwise C appears unchanged and no prompt availability HELLO is sent.
+  forwarding_node.mesh.clear_routes();
+  forwarding_node.radio.sent.clear();
+  forwarding_node.receive(make_hello(FABRIC, NODE_C, "node-c", {}, FLAG_GATEWAY, 93));
+  advance_and_loop(forwarding_node, 1000);
+
+  EXPECT_EQ(forwarding_node.radio.sent.size(), 1u);
+  const auto &availability_hello = forwarding_node.radio.sent[0];
+  EXPECT_TRUE(hello_advertises_gateway_state(availability_hello, NODE_C, true));
+}
+
 static void test_gateway_transition_hello_updates_are_coalesced() {
   TestNode a("node-a");
 
@@ -703,6 +871,56 @@ static void test_gateway_transition_hello_updates_are_coalesced() {
 
   EXPECT_EQ(a.radio.sent.size(), 1u);
   EXPECT_FALSE(a.radio.sent[0][5] & FLAG_GATEWAY);  // final state wins
+}
+
+static void test_gateway_hello_rate_limit_preserves_final_stable_state() {
+  TestNode gateway_node("node-a");
+
+  gateway_node.mesh.set_upstream_connected(true);
+  advance_and_loop(gateway_node, 1000);
+  EXPECT_EQ(gateway_node.radio.sent.size(), 1u);
+  EXPECT_TRUE(gateway_node.radio.sent[0][5] & FLAG_GATEWAY);
+  gateway_node.radio.sent.clear();
+
+  // Flap repeatedly inside the one-second immediate-HELLO window, ending
+  // disconnected. No intermediate state may escape before the deadline.
+  for (int i = 0; i < 20; ++i) {
+    gateway_node.mesh.set_upstream_connected((i % 2) == 0);
+  }
+  gateway_node.mesh.loop();
+  advance_and_loop(gateway_node, 999);
+  EXPECT_EQ(gateway_node.radio.sent.size(), 0u);
+
+  // The pending request survives coalescing and advertises the final stable
+  // Gateway Withdrawal as soon as the rate-limit window closes.
+  advance_and_loop(gateway_node, 1);
+  EXPECT_EQ(gateway_node.radio.sent.size(), 1u);
+  EXPECT_FALSE(gateway_node.radio.sent[0][5] & FLAG_GATEWAY);
+}
+
+static void test_silent_gateway_expires_after_three_missed_hellos_and_next_send_uses_alternative() {
+  TestNode offline_node("node-a");
+
+  // C starts as the Nearest Gateway. D is a weaker direct alternative that
+  // continues sending HELLOs while C disappears without a Withdrawal.
+  offline_node.receive(make_hello(FABRIC, NODE_C, "node-c", {}, FLAG_GATEWAY, 70), -50.0f);
+  offline_node.receive(make_hello(FABRIC, NODE_D, "node-d", {}, FLAG_GATEWAY, 80), -90.0f);
+  expect_nearest_gateway(offline_node, NODE_C);
+
+  // The production defaults are a 30-second HELLO interval and a Route lease
+  // of three missed HELLOs. Refresh only D during that failure-detection window.
+  for (uint32_t missed = 1; missed <= 3; ++missed) {
+    advance_and_loop(offline_node, 30000);
+    offline_node.receive(make_hello(FABRIC, NODE_D, "node-d", {}, FLAG_GATEWAY, 80 + missed), -90.0f);
+  }
+
+  expect_nearest_gateway(offline_node, NODE_D);
+
+  offline_node.radio.sent.clear();
+  EXPECT_TRUE(offline_node.mesh.send_to_gateway("after-expiry"));
+  offline_node.mesh.loop();
+  EXPECT_EQ(offline_node.radio.sent.size(), 1u);
+  EXPECT_EQ(get_u32_le(&offline_node.radio.sent[0][esphome::lora_mesh::MESH_OFF_DST_ID]), NODE_D);
 }
 
 // ── Slice 8: bounded TX queue with randomized jitter (issue #12) ────────────
@@ -957,7 +1175,14 @@ int main() {
   RUN_TEST(test_online_node_has_no_local_send_to_gateway_delivery);
   RUN_TEST(test_rejected_gateway_send_is_not_retried_after_queue_drains);
   RUN_TEST(test_three_node_gateway_discovery_and_delivery);
+  RUN_TEST(test_gateway_promotion_and_withdrawal_propagate_promptly_and_select_alternative);
+  RUN_TEST(test_gateway_change_is_included_when_hello_cannot_fit_every_route);
+  RUN_TEST(test_gateway_changes_over_hello_capacity_continue_in_bounded_updates);
+  RUN_TEST(test_pending_gateway_withdrawal_survives_route_table_pressure);
+  RUN_TEST(test_new_gateway_in_reused_route_slot_still_schedules_hello);
   RUN_TEST(test_gateway_transition_hello_updates_are_coalesced);
+  RUN_TEST(test_gateway_hello_rate_limit_preserves_final_stable_state);
+  RUN_TEST(test_silent_gateway_expires_after_three_missed_hellos_and_next_send_uses_alternative);
   RUN_TEST(test_app_send_is_queued_not_transmitted_inline);
   RUN_TEST(test_at_most_one_transmit_per_loop);
   RUN_TEST(test_forwarding_is_queued_not_inline);

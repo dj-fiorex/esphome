@@ -92,7 +92,7 @@ CONFIG_SCHEMA = cv.All(
                 CONF_DISCOVERY_INTERVAL, default="30s"
             ): cv.positive_time_period_milliseconds,
             cv.Optional(
-                CONF_ROUTE_TTL, default="5min"
+                CONF_ROUTE_TTL, default="90s"
             ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_MAX_ROUTES, default=16): cv.int_range(min=4, max=255),
             cv.Optional(CONF_SEEN_CACHE_SIZE, default=32): cv.int_range(min=8, max=255),

@@ -134,6 +134,8 @@ class LoraMesh : public Component {
   void drain_tx_queue_(uint32_t now);
   void schedule_hello_update_();
   void queue_pending_hello_(uint32_t now);
+  void acknowledge_advertised_gateway_updates_(const Packet &hello);
+  bool has_pending_gateway_updates_() const;
 
   // ── Packet processing ──────────────────────────────────────────────────
   void process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset, uint32_t src_id, bool src_is_gateway,
@@ -205,7 +207,7 @@ class LoraMesh : public Component {
   bool hello_update_pending_{false};
   uint8_t max_hops_{8};
   uint32_t discovery_interval_ms_{30000};
-  uint32_t route_ttl_ms_{300000};
+  uint32_t route_ttl_ms_{90000};
   uint32_t seen_cache_ttl_ms_{120000};
   bool forward_messages_{true};
   uint32_t frame_counter_{0};

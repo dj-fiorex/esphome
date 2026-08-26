@@ -657,7 +657,9 @@ Packet LoraMesh::build_header_(PacketType type, uint8_t flags, uint32_t dst_id, 
 Packet LoraMesh::build_hello_packet_() {
   uint8_t flags = this->upstream_connected_ ? FLAG_IS_GATEWAY : 0;
 
-  // Collect valid routes, sorted by hop_count ascending.
+  // Collect valid routes. Gateway state changes take bounded priority so an
+  // immediate HELLO cannot omit the promotion or Withdrawal when every Route
+  // does not fit; remaining changes stay pending for a later rate-limited HELLO.
   static_assert(LORA_MESH_MAX_ROUTES <= 255, "LORA_MESH_MAX_ROUTES must be <= 255");
   std::array<const RouteEntry *, LORA_MESH_MAX_ROUTES> ptrs{};
   size_t count = 0;
@@ -666,9 +668,14 @@ Packet LoraMesh::build_hello_packet_() {
       ptrs[count++] = &r;
     }
   }
-  // Sort valid route pointers by hop_count ascending to prioritise close neighbours.
+  // Otherwise sort by hop_count ascending to prioritise close neighbours.
   std::sort(ptrs.begin(), ptrs.begin() + static_cast<ptrdiff_t>(count),
-            [](const RouteEntry *a, const RouteEntry *b) { return a->hop_count < b->hop_count; });
+            [](const RouteEntry *left_route, const RouteEntry *right_route) {
+              if (left_route->gateway_update_pending != right_route->gateway_update_pending) {
+                return left_route->gateway_update_pending;
+              }
+              return left_route->hop_count < right_route->hop_count;
+            });
 
   size_t name_len = std::min(this->node_id_str_.size(), MESH_NODE_NAME_MAX_LEN);
   // Overhead = proto_version(1) + name_len_field(1) + name(name_len) + route_count(1).
@@ -790,10 +797,32 @@ void LoraMesh::queue_pending_hello_(uint32_t now) {
   }
   auto pkt = this->build_hello_packet_();
   if (this->enqueue_tx_(pkt)) {
-    this->hello_update_pending_ = false;
+    this->acknowledge_advertised_gateway_updates_(pkt);
+    this->hello_update_pending_ = this->has_pending_gateway_updates_();
     this->last_hello_ = now;
     ESP_LOGD(TAG, "HELLO queued (%zu bytes)", pkt.size());
   }
+}
+
+void LoraMesh::acknowledge_advertised_gateway_updates_(const Packet &hello) {
+  size_t route_count_offset = MESH_HEADER_SIZE + 2 + hello[MESH_HEADER_SIZE + 1];
+  uint8_t route_count = hello[route_count_offset];
+  size_t route_offset = route_count_offset + 1;
+  for (uint8_t index = 0; index < route_count; ++index, route_offset += ROUTE_ADV_SIZE) {
+    RouteEntry *route = this->find_route_(get_u32_le(&hello[route_offset + ROUTE_ADV_OFF_DEST_ID]));
+    if (route != nullptr) {
+      route->gateway_update_pending = false;
+    }
+  }
+}
+
+bool LoraMesh::has_pending_gateway_updates_() const {
+  for (const auto &route : this->routes_) {
+    if (route.is_valid && route.gateway_update_pending) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // ─── Routing table ────────────────────────────────────────────────────────────
@@ -848,9 +877,14 @@ RouteEntry *LoraMesh::alloc_route_slot_() {
       return &r;
     }
   }
-  // Table full: evict route with most hops, lowest RSSI.
+  // Table full: evict the non-pending route with most hops, lowest RSSI. A
+  // Gateway change remains protected until a HELLO has actually advertised it;
+  // if every Route is pending, defer learning the new Route until a later HELLO.
   RouteEntry *worst = nullptr;
   for (auto &r : this->routes_) {
+    if (r.gateway_update_pending) {
+      continue;
+    }
     if (worst == nullptr || r.hop_count > worst->hop_count ||
         (r.hop_count == worst->hop_count && r.rssi < worst->rssi)) {
       worst = &r;
@@ -859,6 +893,8 @@ RouteEntry *LoraMesh::alloc_route_slot_() {
   if (worst != nullptr) {
     ESP_LOGD(TAG, "Route table full, evicting 0x%08" PRIX32, worst->dst_id);
     worst->is_valid = false;
+  } else {
+    ESP_LOGD(TAG, "Route table full of pending Gateway updates, deferring new Route");
   }
   return worst;
 }
@@ -873,6 +909,7 @@ void LoraMesh::update_route_(uint32_t dst_id, uint32_t next_hop, uint8_t hops, b
     if (r == nullptr) {
       return;
     }
+    *r = RouteEntry{};
     r->dst_id = dst_id;
     changed = true;
   }
@@ -889,6 +926,7 @@ void LoraMesh::update_route_(uint32_t dst_id, uint32_t next_hop, uint8_t hops, b
   // that re-advertises at equal quality and send_to_gateway() finds no route.
   if (r->is_gateway != is_gw) {
     r->is_gateway = is_gw;
+    r->gateway_update_pending = true;
     changed = true;
     gateway_changed = true;
   }
@@ -907,7 +945,7 @@ void LoraMesh::expire_routes_() {
   uint32_t now = millis();
   bool any = false;
   for (auto &r : this->routes_) {
-    if (r.is_valid && static_cast<int32_t>(r.expires_at - now) < 0) {
+    if (r.is_valid && static_cast<int32_t>(r.expires_at - now) <= 0) {
       ESP_LOGD(TAG, "Route to 0x%08" PRIX32 " expired", r.dst_id);
       r.is_valid = false;
       any = true;

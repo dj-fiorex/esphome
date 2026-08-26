@@ -148,9 +148,9 @@ lora_mesh:
   link_sim: true
   # Test-tuned timings: fast convergence + prompt expiry so multi-hop and
   # self-healing are observable in tens of seconds (production defaults are
-  # 30s / 5min / 2min).
+  # 30s / 90s / 2min).
   discovery_interval: 10s
-  route_ttl: 40s
+  route_ttl: 30s
   seen_cache_ttl: 1min
   # Diagnostic sensors (declared below) — the component publishes to these.
   node_count_sensor_id: mesh_node_count

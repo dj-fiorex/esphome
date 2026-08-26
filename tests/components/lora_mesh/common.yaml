@@ -16,7 +16,7 @@ lora_mesh:
   fabric_key: "00000000000000000000000000000000"
   max_hops: 8
   discovery_interval: 30s
-  route_ttl: 5min
+  route_ttl: 90s
   max_routes: 16
   seen_cache_size: 32
   seen_cache_ttl: 2min

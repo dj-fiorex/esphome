@@ -85,6 +85,18 @@ protocol version 4, a Node name no longer than 32 bytes, the exact packet length
 tag before it updates duplicate suppression, Node names, direct or advertised Routes, Gateway visibility,
 diagnostics, or callbacks.
 
+When Gateway eligibility changes, the Gateway schedules a coalesced, rate-limited HELLO. A Node that learns the
+promotion or Gateway Withdrawal does the same, so the final state advances one hop after each immediate-update window
+without waiting one periodic HELLO interval per hop. The rate limiter preserves a pending update while states flap;
+the HELLO is built at enqueue time and therefore advertises the final stable Gateway state. Changed Gateway Routes
+take priority when the Route table exceeds one HELLO's capacity, and unadvertised changes remain pending for later
+rate-limited HELLOs. A Route with a pending Gateway change is protected from table-pressure eviction until one of
+those HELLOs advertises its final state.
+
+Abrupt disappearance has no withdrawal packet. Ordinary neighbour and dependent-Route expiry remains the only failure
+detector. The production defaults pair a 30-second periodic HELLO with a 90-second Route lease, approximately three
+missed HELLOs; the next `send_to_gateway()` call selects from the Routes still valid after expiry.
+
 ## Persistent counters and replay protection
 
 The sender counter is part of the CCM nonce, so a Node must not reuse it with the same Fabric Key and source ID.
