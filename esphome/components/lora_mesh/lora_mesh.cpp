@@ -338,7 +338,7 @@ void LoraMesh::on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, f
   }
   const uint8_t *h = pkt;
 
-  // Fabric ID filter (relay gate).
+  // Fabric ID filter (Forwarding gate).
   uint32_t fabric_id = get_u32_le(h + MESH_OFF_FABRIC_ID);
   if (fabric_id != this->fabric_id_) {
     ESP_LOGV(TAG, "Fabric ID mismatch (0x%08" PRIX32 " vs 0x%08" PRIX32 "), dropped", fabric_id, this->fabric_id_);
@@ -446,9 +446,9 @@ bool LoraMesh::validate_hello_packet_(const uint8_t *pkt, size_t pkt_len) const 
     return false;
   }
   for (size_t pos = route_count_offset + 1; pos < authenticated_size; pos += ROUTE_ADV_SIZE) {
-    uint32_t advertised_destination = get_u32_le(pkt + pos);
-    uint8_t advertised_hops = pkt[pos + 4];
-    uint8_t route_flags = pkt[pos + 6];
+    uint32_t advertised_destination = get_u32_le(pkt + pos + ROUTE_ADV_OFF_DEST_ID);
+    uint8_t advertised_hops = pkt[pos + ROUTE_ADV_OFF_HOP_COUNT];
+    uint8_t route_flags = pkt[pos + ROUTE_ADV_OFF_FLAGS];
     if (advertised_destination == MESH_BROADCAST_ID || advertised_destination == src_id || advertised_hops == 0 ||
         advertised_hops == UINT8_MAX || (route_flags & ~ROUTE_FLAG_IS_GATEWAY) != 0) {
       return false;
@@ -502,10 +502,10 @@ void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset,
   size_t authenticated_size = pkt_len - HELLO_AUTH_TAG_SIZE;
 
   for (uint8_t i = 0; i < route_count && pos + ROUTE_ADV_SIZE <= authenticated_size; ++i, pos += ROUTE_ADV_SIZE) {
-    uint32_t adv_dst = get_u32_le(pkt + pos);
-    uint8_t adv_hops = pkt[pos + 4];
-    float advertised_rssi = static_cast<float>(static_cast<int8_t>(pkt[pos + 5]));
-    bool advertised_gateway = (pkt[pos + 6] & ROUTE_FLAG_IS_GATEWAY) != 0;
+    uint32_t adv_dst = get_u32_le(pkt + pos + ROUTE_ADV_OFF_DEST_ID);
+    uint8_t adv_hops = pkt[pos + ROUTE_ADV_OFF_HOP_COUNT];
+    float advertised_rssi = static_cast<float>(static_cast<int8_t>(pkt[pos + ROUTE_ADV_OFF_PATH_RSSI]));
+    bool advertised_gateway = (pkt[pos + ROUTE_ADV_OFF_FLAGS] & ROUTE_FLAG_IS_GATEWAY) != 0;
 
     if (adv_dst == this->node_id_ || adv_dst == src_id) {
       continue;
@@ -514,15 +514,16 @@ void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset,
     if (new_hops > this->max_hops_) {
       continue;
     }
+    float path_rssi = std::min(advertised_rssi, rssi);
     const RouteEntry *existing = this->find_route_(adv_dst);
     // Accept a strictly better path from anyone; renew the lease when our
     // current next hop re-confirms the route at equal quality (ADR 0002) —
     // otherwise stable multi-hop routes expire and flap every route_ttl.
-    bool better = existing == nullptr || new_hops < existing->hop_count;
+    bool better = existing == nullptr || new_hops < existing->hop_count ||
+                  (new_hops == existing->hop_count && path_rssi > existing->rssi);
     bool reconfirmed = existing != nullptr && existing->next_hop_id == src_id && new_hops == existing->hop_count;
     if (better || reconfirmed) {
-      this->update_route_(adv_dst, src_id, static_cast<uint8_t>(new_hops), advertised_gateway,
-                          std::min(advertised_rssi, rssi), snr);
+      this->update_route_(adv_dst, src_id, static_cast<uint8_t>(new_hops), advertised_gateway, path_rssi, snr);
     }
   }
 
@@ -616,7 +617,7 @@ void LoraMesh::process_data_(const uint8_t *pkt, size_t pkt_len, size_t offset, 
 
   // Packet forwarding: copy the incoming packet into a stack-allocated Packet,
   // then patch the TTL, hop_count, prev_hop and next_hop fields before retransmitting.
-  // Header + encrypted body are forwarded verbatim (relay does not need the key).
+  // Header + encrypted body are Forwarded verbatim (the Forwarding Node does not need the key).
   Packet fwd(pkt, pkt + pkt_len);
   fwd[MESH_OFF_TTL] = ttl - 1;
   fwd[MESH_OFF_HOP_COUNT] = hop_count + 1;
@@ -693,12 +694,12 @@ Packet LoraMesh::build_hello_packet_() {
   for (size_t i = 0; i < max_routes; ++i) {
     const RouteEntry *r = ptrs[i];
     uint8_t entry[ROUTE_ADV_SIZE];
-    put_u32_le(entry, r->dst_id);
-    entry[4] = r->hop_count;
+    put_u32_le(entry + ROUTE_ADV_OFF_DEST_ID, r->dst_id);
+    entry[ROUTE_ADV_OFF_HOP_COUNT] = r->hop_count;
     int clamped = static_cast<int>(r->rssi);
     clamped = (clamped < -128) ? -128 : (clamped > 127) ? 127 : clamped;
-    entry[5] = static_cast<uint8_t>(static_cast<int8_t>(clamped));
-    entry[6] = r->is_gateway ? ROUTE_FLAG_IS_GATEWAY : 0;
+    entry[ROUTE_ADV_OFF_PATH_RSSI] = static_cast<uint8_t>(static_cast<int8_t>(clamped));
+    entry[ROUTE_ADV_OFF_FLAGS] = r->is_gateway ? ROUTE_FLAG_IS_GATEWAY : 0;
     for (uint8_t b : entry) {
       pkt.push_back(b);
     }
@@ -764,7 +765,7 @@ void LoraMesh::drain_tx_queue_(uint32_t now) {
     return;
   }
   // Sample a fresh random backoff once per head packet (poor-man's CSMA:
-  // de-syncs relays that all queued the same packet at the same instant).
+  // de-syncs Forwarding Nodes that all queued the same packet at the same instant).
   if (!this->tx_backoff_armed_) {
     uint32_t backoff = this->tx_jitter_ms_ > 0 ? random_uint32() % (this->tx_jitter_ms_ + 1) : 0;
     this->tx_next_tx_at_ = now + backoff;
@@ -911,7 +912,7 @@ void LoraMesh::expire_routes_() {
       r.is_valid = false;
       any = true;
       // Passive self-healing (ADR 0002): a direct neighbour going silent
-      // invalidates every route relayed through it, so those destinations are
+      // invalidates every Route Forwarded through it, so those destinations are
       // re-learned from other neighbours' HELLOs instead of black-holing.
       if (r.dst_id == r.next_hop_id) {
         this->invalidate_routes_via_(r.dst_id);

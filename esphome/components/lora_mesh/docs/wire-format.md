@@ -46,7 +46,7 @@ Forwarded.
 ```
 
 The maximum application payload is `255 - 28 - 1 - 8 = 218` bytes. Longer application strings are truncated to
-that supported limit before encryption. The body must have exactly `1 + P + 8` bytes; receivers and relays reject
+that supported limit before encryption. The body must have exactly `1 + P + 8` bytes; receiving and Forwarding Nodes reject
 truncated bodies, legacy four-byte tags, and trailing bytes before delivery or forwarding.
 
 ### AES-128-CCM construction

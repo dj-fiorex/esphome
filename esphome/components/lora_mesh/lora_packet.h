@@ -101,6 +101,10 @@ static constexpr uint8_t FLAG_IS_FORWARD = 0x08;  // This is a forwarded packet
 // ───────────────────────────────────────────────────────────────────────────
 
 static constexpr size_t HELLO_FIXED_SIZE = 2;
+static constexpr size_t ROUTE_ADV_OFF_DEST_ID = 0;
+static constexpr size_t ROUTE_ADV_OFF_HOP_COUNT = 4;
+static constexpr size_t ROUTE_ADV_OFF_PATH_RSSI = 5;
+static constexpr size_t ROUTE_ADV_OFF_FLAGS = 6;
 static constexpr size_t ROUTE_ADV_SIZE = 7;
 static constexpr uint8_t ROUTE_FLAG_IS_GATEWAY = 0x01;
 

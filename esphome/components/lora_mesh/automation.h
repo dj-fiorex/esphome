@@ -43,7 +43,7 @@ template<typename... Ts> class BroadcastMessageAction : public Action<Ts...>, pu
 };
 
 /**
- * lora_mesh.send_to_gateway — send a message to the best known gateway node.
+ * lora_mesh.send_to_gateway — send a message to the Nearest Gateway.
  *
  * YAML:
  *   - lora_mesh.send_to_gateway:

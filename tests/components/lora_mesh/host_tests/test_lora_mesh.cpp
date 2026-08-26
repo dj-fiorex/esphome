@@ -560,6 +560,24 @@ static void test_route_advertisement_propagates_gateway_and_weakest_path_rssi() 
   EXPECT_EQ(get_u32_le(&a.radio.sent[0][24]), NODE_B);
 }
 
+static void test_transmitted_route_advertisement_is_seven_bytes_with_gateway_flag() {
+  TestNode b("node-b");
+
+  b.receive(make_hello(FABRIC, NODE_C, "node-c", {}, FLAG_GATEWAY, 62), -70.0f);
+  advance_and_loop(b, 1000);
+
+  EXPECT_EQ(b.radio.sent.size(), 1u);
+  const auto &hello = b.radio.sent[0];
+  size_t route_count_offset = HDR + 2 + hello[HDR + 1];
+  EXPECT_EQ(hello[route_count_offset], 1u);
+  EXPECT_EQ(hello.size(), route_count_offset + 1 + esphome::lora_mesh::ROUTE_ADV_SIZE + HELLO_TAG_SIZE);
+  size_t route_offset = route_count_offset + 1;
+  EXPECT_EQ(get_u32_le(&hello[route_offset + esphome::lora_mesh::ROUTE_ADV_OFF_DEST_ID]), NODE_C);
+  EXPECT_EQ(hello[route_offset + esphome::lora_mesh::ROUTE_ADV_OFF_HOP_COUNT], 1u);
+  EXPECT_EQ(static_cast<int8_t>(hello[route_offset + esphome::lora_mesh::ROUTE_ADV_OFF_PATH_RSSI]), -70);
+  EXPECT_EQ(hello[route_offset + esphome::lora_mesh::ROUTE_ADV_OFF_FLAGS], esphome::lora_mesh::ROUTE_FLAG_IS_GATEWAY);
+}
+
 static void test_nearest_gateway_selection_is_deterministic() {
   TestNode a("node-a");
 
@@ -589,6 +607,64 @@ static void test_nearest_gateway_selection_is_deterministic() {
   snprintf(lowest_hex, sizeof(lowest_hex), "%08X", lowest_id);
   EXPECT_TRUE(first.mesh.get_nearest_gateway() == lowest_hex);
   EXPECT_TRUE(second.mesh.get_nearest_gateway() == lowest_hex);
+}
+
+static void test_nearest_gateway_uses_strongest_equal_hop_path() {
+  TestNode a("node-a");
+
+  // A first learns Gateway C through B with a weak Path RSSI, then learns the
+  // same two-hop Gateway through D with a stronger Path RSSI.
+  a.receive(make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 1, -60, true}}, 0, 57), -90.0f);
+  a.receive(make_hello(FABRIC, NODE_D, "node-d", {{NODE_C, 1, -70, true}}, 0, 58), -70.0f);
+
+  EXPECT_TRUE(a.mesh.send_to_gateway("status"));
+  a.mesh.loop();
+  EXPECT_EQ(get_u32_le(&a.radio.sent[0][esphome::lora_mesh::MESH_OFF_DST_ID]), NODE_C);
+  EXPECT_EQ(get_u32_le(&a.radio.sent[0][esphome::lora_mesh::MESH_OFF_NEXT_HOP]), NODE_D);
+}
+
+static void test_send_to_gateway_reselects_current_nearest_gateway_on_every_call() {
+  TestNode a("node-a");
+
+  a.receive(make_hello(FABRIC, NODE_B, "node-b", {}, FLAG_GATEWAY, 59), -80.0f);
+  EXPECT_TRUE(a.mesh.send_to_gateway("first"));
+  a.mesh.loop();
+  EXPECT_EQ(get_u32_le(&a.radio.sent[0][esphome::lora_mesh::MESH_OFF_DST_ID]), NODE_B);
+
+  a.receive(make_hello(FABRIC, NODE_C, "node-c", {}, FLAG_GATEWAY, 60), -60.0f);
+  EXPECT_TRUE(a.mesh.send_to_gateway("second"));
+  a.mesh.loop();
+  EXPECT_EQ(get_u32_le(&a.radio.sent[1][esphome::lora_mesh::MESH_OFF_DST_ID]), NODE_C);
+}
+
+static void test_online_node_has_no_local_send_to_gateway_delivery() {
+  TestNode a("node-a");
+
+  a.mesh.set_upstream_connected(true);
+
+  EXPECT_FALSE(a.mesh.send_to_gateway("local"));
+  EXPECT_EQ(a.received.size(), 0u);
+}
+
+static void test_rejected_gateway_send_is_not_retried_after_queue_drains() {
+  TestNode a("node-a");
+
+  a.receive(make_hello(FABRIC, NODE_B, "node-b", {}, FLAG_GATEWAY, 61));
+  advance_and_loop(a, 1000);  // consume the Route-change HELLO
+  a.radio.sent.clear();
+
+  for (int i = 0; i < 8; ++i) {
+    EXPECT_TRUE(a.mesh.broadcast_message("queued"));
+  }
+  EXPECT_FALSE(a.mesh.send_to_gateway("must-not-be-retained"));
+
+  for (int i = 0; i < 20; ++i) {
+    a.mesh.loop();
+  }
+  EXPECT_EQ(a.radio.sent.size(), 8u);
+  for (const auto &packet : a.radio.sent) {
+    EXPECT_EQ(get_u32_le(&packet[esphome::lora_mesh::MESH_OFF_DST_ID]), BROADCAST);
+  }
 }
 
 static void test_three_node_gateway_discovery_and_delivery() {
@@ -874,7 +950,12 @@ int main() {
   RUN_TEST(test_gateway_flag_refreshed_when_neighbor_becomes_gateway);
   RUN_TEST(test_upstream_connectivity_starts_false_and_only_real_transitions_schedule_hello);
   RUN_TEST(test_route_advertisement_propagates_gateway_and_weakest_path_rssi);
+  RUN_TEST(test_transmitted_route_advertisement_is_seven_bytes_with_gateway_flag);
   RUN_TEST(test_nearest_gateway_selection_is_deterministic);
+  RUN_TEST(test_nearest_gateway_uses_strongest_equal_hop_path);
+  RUN_TEST(test_send_to_gateway_reselects_current_nearest_gateway_on_every_call);
+  RUN_TEST(test_online_node_has_no_local_send_to_gateway_delivery);
+  RUN_TEST(test_rejected_gateway_send_is_not_retried_after_queue_drains);
   RUN_TEST(test_three_node_gateway_discovery_and_delivery);
   RUN_TEST(test_gateway_transition_hello_updates_are_coalesced);
   RUN_TEST(test_app_send_is_queued_not_transmitted_inline);

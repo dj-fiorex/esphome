@@ -129,7 +129,7 @@ class LoraMesh : public Component {
   // All outbound packets are enqueued here and drained at most one per
   // loop() iteration; the radio does blind blocking TX, so this bounds the
   // loop stall to one packet's airtime and the pre-send jitter is a
-  // poor-man's CSMA against simultaneous relays.
+  // poor-man's CSMA against simultaneous Forwarding Nodes.
   bool enqueue_tx_(const Packet &pkt);
   void drain_tx_queue_(uint32_t now);
   void schedule_hello_update_();
