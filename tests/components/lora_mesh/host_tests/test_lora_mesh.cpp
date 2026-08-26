@@ -61,8 +61,8 @@ static void test_broadcast_data_has_v4_header() {
 
   // Verify the ciphertext decrypts to "hi" with the test Fabric Key.
   uint8_t plaintext[2];
-  bool ok = esphome::lora_mesh::mesh_decrypt_payload(TEST_FABRIC_KEY, NODE_A, BROADCAST, 2, PKT_DATA, 2, &pkt[HDR + 1],
-                                                     plaintext, &pkt[HDR + 1 + 2]);
+  bool ok = esphome::lora_mesh::mesh_decrypt_payload(TEST_FABRIC_KEY, NODE_A, BROADCAST, 2, PKT_DATA, FLAG_BROADCAST, 2,
+                                                     &pkt[HDR + 1], plaintext, &pkt[HDR + 1 + 2]);
   EXPECT_TRUE(ok);
   EXPECT_EQ(plaintext[0], 'h');
   EXPECT_EQ(plaintext[1], 'i');
@@ -514,6 +514,26 @@ static void test_modified_data_does_not_reach_application_callback() {
   EXPECT_EQ(b.received.size(), 0u);
 }
 
+static void test_modified_data_flags_do_not_reach_application_callback() {
+  TestNode b("node-b");
+  auto pkt = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "authentic", 10, 8, 0, NODE_A);
+
+  pkt[5] ^= FLAG_GATEWAY;
+  b.receive(pkt);
+
+  EXPECT_EQ(b.received.size(), 0u);
+}
+
+static void test_data_with_trailing_bytes_does_not_reach_application_callback() {
+  TestNode b("node-b");
+  auto pkt = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "authentic", 10, 8, 0, NODE_A);
+
+  pkt.push_back(0x00);
+  b.receive(pkt);
+
+  EXPECT_EQ(b.received.size(), 0u);
+}
+
 static void test_protocol_v3_four_byte_data_tag_is_rejected() {
   TestNode b("node-b");
   auto packet = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "legacy", 10, 8, 0, NODE_A);
@@ -522,6 +542,18 @@ static void test_protocol_v3_four_byte_data_tag_is_rejected() {
   b.receive(packet);
 
   EXPECT_EQ(b.received.size(), 0u);
+}
+
+static void test_protocol_v3_four_byte_data_tag_is_not_forwarded() {
+  TestNode b("node-b");
+  b.receive(make_hello(FABRIC, NODE_C, "node-c"));
+  auto packet = make_data(FABRIC, NODE_A, NODE_C, NODE_B, "legacy", 10, 8, 0, NODE_A);
+  packet.resize(packet.size() - 4);
+
+  b.receive(packet);
+  b.mesh.loop();
+
+  EXPECT_EQ(b.radio.sent.size(), 0u);
 }
 
 static void test_replay_rejected() {
@@ -602,7 +634,10 @@ int main() {
   RUN_TEST(test_same_fabric_key_decrypts_payload);
   RUN_TEST(test_wrong_key_drops_packet);
   RUN_TEST(test_modified_data_does_not_reach_application_callback);
+  RUN_TEST(test_modified_data_flags_do_not_reach_application_callback);
+  RUN_TEST(test_data_with_trailing_bytes_does_not_reach_application_callback);
   RUN_TEST(test_protocol_v3_four_byte_data_tag_is_rejected);
+  RUN_TEST(test_protocol_v3_four_byte_data_tag_is_not_forwarded);
   RUN_TEST(test_replay_rejected);
   RUN_TEST(test_frame_counter_persists_across_reboot);
   printf("\n%s (%d failure%s)\n", g_failures == 0 ? "OK" : "FAILED", g_failures, g_failures == 1 ? "" : "s");

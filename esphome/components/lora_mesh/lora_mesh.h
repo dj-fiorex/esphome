@@ -190,6 +190,7 @@ class LoraMesh : public Component {
   /** Update high-water mark for a source after successful MIC verification. */
   void update_replay_counter_(uint32_t src_id, uint32_t frame_counter);
 
+ private:
   // ── State ──────────────────────────────────────────────────────────────
   LoRaRadio *radio_{nullptr};
   uint32_t node_id_{0};

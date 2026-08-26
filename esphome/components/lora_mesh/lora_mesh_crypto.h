@@ -4,7 +4,7 @@
 // Wire format: docs/wire-format.md §4.
 //
 // Nonce  (13 bytes): src_id(4) || dst_id(4) || frame_counter(4) || 0x00(1)
-// AAD    (14 bytes): pkt_type(1) || src_id(4) || dst_id(4) || frame_counter(4) || payload_len(1)
+// AAD    (15 bytes): pkt_type(1) || flags(1) || src_id(4) || dst_id(4) || frame_counter(4) || payload_len(1)
 // Tag    (8 bytes):  CCM authentication tag appended after ciphertext
 //
 // On embedded targets this uses mbedtls (already linked by ESP-IDF / Arduino).
@@ -24,8 +24,8 @@ static constexpr size_t DATA_AUTH_TAG_SIZE = 8;
 /// Nonce size for AES-128-CCM (13 bytes).
 static constexpr size_t CCM_NONCE_SIZE = 13;
 
-/// AAD size for the DATA packet (14 bytes).
-static constexpr size_t CCM_AAD_SIZE = 14;
+/// AAD size for the DATA packet (15 bytes).
+static constexpr size_t CCM_AAD_SIZE = 15;
 
 /** Domain-separated AES-CCM inputs for the public Fabric ID derivation. */
 static constexpr uint8_t FABRIC_ID_DERIVATION_NONCE[13] = {'L', 'O', 'R', 'A', '-', 'F', 'A',
@@ -52,23 +52,29 @@ inline void build_ccm_nonce(uint8_t nonce[CCM_NONCE_SIZE], uint32_t src_id, uint
   nonce[12] = 0x00;
 }
 
-/// Build the 14-byte AAD: pkt_type || src_id || dst_id || frame_counter || payload_len.
-inline void build_ccm_aad(uint8_t aad[CCM_AAD_SIZE], uint8_t pkt_type, uint32_t src_id, uint32_t dst_id,
+/// Build the 15-byte AAD: pkt_type || flags || src_id || dst_id || frame_counter || payload_len.
+inline void build_ccm_aad(uint8_t aad[CCM_AAD_SIZE], uint8_t pkt_type, uint8_t flags, uint32_t src_id, uint32_t dst_id,
                           uint32_t frame_counter, uint8_t payload_len) {
   aad[0] = pkt_type;
-  aad[1] = static_cast<uint8_t>(src_id);
-  aad[2] = static_cast<uint8_t>(src_id >> 8);
-  aad[3] = static_cast<uint8_t>(src_id >> 16);
-  aad[4] = static_cast<uint8_t>(src_id >> 24);
-  aad[5] = static_cast<uint8_t>(dst_id);
-  aad[6] = static_cast<uint8_t>(dst_id >> 8);
-  aad[7] = static_cast<uint8_t>(dst_id >> 16);
-  aad[8] = static_cast<uint8_t>(dst_id >> 24);
-  aad[9] = static_cast<uint8_t>(frame_counter);
-  aad[10] = static_cast<uint8_t>(frame_counter >> 8);
-  aad[11] = static_cast<uint8_t>(frame_counter >> 16);
-  aad[12] = static_cast<uint8_t>(frame_counter >> 24);
-  aad[13] = payload_len;
+  aad[1] = flags;
+  aad[2] = static_cast<uint8_t>(src_id);
+  aad[3] = static_cast<uint8_t>(src_id >> 8);
+  aad[4] = static_cast<uint8_t>(src_id >> 16);
+  aad[5] = static_cast<uint8_t>(src_id >> 24);
+  aad[6] = static_cast<uint8_t>(dst_id);
+  aad[7] = static_cast<uint8_t>(dst_id >> 8);
+  aad[8] = static_cast<uint8_t>(dst_id >> 16);
+  aad[9] = static_cast<uint8_t>(dst_id >> 24);
+  aad[10] = static_cast<uint8_t>(frame_counter);
+  aad[11] = static_cast<uint8_t>(frame_counter >> 8);
+  aad[12] = static_cast<uint8_t>(frame_counter >> 16);
+  aad[13] = static_cast<uint8_t>(frame_counter >> 24);
+  aad[14] = payload_len;
+}
+
+inline uint32_t fabric_id_from_tag(const uint8_t tag[DATA_AUTH_TAG_SIZE]) {
+  return static_cast<uint32_t>(tag[0]) | (static_cast<uint32_t>(tag[1]) << 8) | (static_cast<uint32_t>(tag[2]) << 16) |
+         (static_cast<uint32_t>(tag[3]) << 24);
 }
 
 // ── Platform-specific AES-128-CCM implementation ─────────────────────────────
@@ -375,8 +381,7 @@ inline uint32_t derive_fabric_id(const uint8_t key[FABRIC_KEY_SIZE]) {
   detail::aes128_ccm_encrypt(key, FABRIC_ID_DERIVATION_NONCE, sizeof(FABRIC_ID_DERIVATION_NONCE),
                              FABRIC_ID_DERIVATION_AAD, sizeof(FABRIC_ID_DERIVATION_AAD), &unused, 0, &unused, tag,
                              sizeof(tag));
-  return static_cast<uint32_t>(tag[0]) | (static_cast<uint32_t>(tag[1]) << 8) | (static_cast<uint32_t>(tag[2]) << 16) |
-         (static_cast<uint32_t>(tag[3]) << 24);
+  return fabric_id_from_tag(tag);
 }
 
 /// Encrypt plaintext payload in-place for a DATA packet.
@@ -384,12 +389,12 @@ inline uint32_t derive_fabric_id(const uint8_t key[FABRIC_KEY_SIZE]) {
 /// and `tag` contains the eight-byte authentication tag.
 /// Returns true on success.
 inline bool mesh_encrypt_payload(const uint8_t key[FABRIC_KEY_SIZE], uint32_t src_id, uint32_t dst_id,
-                                 uint32_t frame_counter, uint8_t pkt_type, uint8_t payload_len,
+                                 uint32_t frame_counter, uint8_t pkt_type, uint8_t flags, uint8_t payload_len,
                                  const uint8_t *plaintext, uint8_t *ciphertext, uint8_t tag[DATA_AUTH_TAG_SIZE]) {
   uint8_t nonce[CCM_NONCE_SIZE];
   uint8_t aad[CCM_AAD_SIZE];
   build_ccm_nonce(nonce, src_id, dst_id, frame_counter);
-  build_ccm_aad(aad, pkt_type, src_id, dst_id, frame_counter, payload_len);
+  build_ccm_aad(aad, pkt_type, flags, src_id, dst_id, frame_counter, payload_len);
   return detail::aes128_ccm_encrypt(key, nonce, CCM_NONCE_SIZE, aad, CCM_AAD_SIZE, plaintext, payload_len, ciphertext,
                                     tag, DATA_AUTH_TAG_SIZE);
 }
@@ -399,12 +404,12 @@ inline bool mesh_encrypt_payload(const uint8_t key[FABRIC_KEY_SIZE], uint32_t sr
 /// On success, `plaintext` contains the decrypted payload.
 /// Returns true if the tag verifies (packet is authentic).
 inline bool mesh_decrypt_payload(const uint8_t key[FABRIC_KEY_SIZE], uint32_t src_id, uint32_t dst_id,
-                                 uint32_t frame_counter, uint8_t pkt_type, uint8_t payload_len,
+                                 uint32_t frame_counter, uint8_t pkt_type, uint8_t flags, uint8_t payload_len,
                                  const uint8_t *ciphertext, uint8_t *plaintext, const uint8_t *tag) {
   uint8_t nonce[CCM_NONCE_SIZE];
   uint8_t aad[CCM_AAD_SIZE];
   build_ccm_nonce(nonce, src_id, dst_id, frame_counter);
-  build_ccm_aad(aad, pkt_type, src_id, dst_id, frame_counter, payload_len);
+  build_ccm_aad(aad, pkt_type, flags, src_id, dst_id, frame_counter, payload_len);
   return detail::aes128_ccm_decrypt(key, nonce, CCM_NONCE_SIZE, aad, CCM_AAD_SIZE, ciphertext, payload_len, plaintext,
                                     tag, DATA_AUTH_TAG_SIZE);
 }
@@ -428,17 +433,16 @@ inline uint32_t derive_fabric_id(const uint8_t key[FABRIC_KEY_SIZE]) {
   if (ret != 0) {
     return 0;
   }
-  return static_cast<uint32_t>(tag[0]) | (static_cast<uint32_t>(tag[1]) << 8) | (static_cast<uint32_t>(tag[2]) << 16) |
-         (static_cast<uint32_t>(tag[3]) << 24);
+  return fabric_id_from_tag(tag);
 }
 
 inline bool mesh_encrypt_payload(const uint8_t key[FABRIC_KEY_SIZE], uint32_t src_id, uint32_t dst_id,
-                                 uint32_t frame_counter, uint8_t pkt_type, uint8_t payload_len,
+                                 uint32_t frame_counter, uint8_t pkt_type, uint8_t flags, uint8_t payload_len,
                                  const uint8_t *plaintext, uint8_t *ciphertext, uint8_t tag[DATA_AUTH_TAG_SIZE]) {
   uint8_t nonce[CCM_NONCE_SIZE];
   uint8_t aad[CCM_AAD_SIZE];
   build_ccm_nonce(nonce, src_id, dst_id, frame_counter);
-  build_ccm_aad(aad, pkt_type, src_id, dst_id, frame_counter, payload_len);
+  build_ccm_aad(aad, pkt_type, flags, src_id, dst_id, frame_counter, payload_len);
 
   mbedtls_ccm_context ctx;
   mbedtls_ccm_init(&ctx);
@@ -454,12 +458,12 @@ inline bool mesh_encrypt_payload(const uint8_t key[FABRIC_KEY_SIZE], uint32_t sr
 }
 
 inline bool mesh_decrypt_payload(const uint8_t key[FABRIC_KEY_SIZE], uint32_t src_id, uint32_t dst_id,
-                                 uint32_t frame_counter, uint8_t pkt_type, uint8_t payload_len,
+                                 uint32_t frame_counter, uint8_t pkt_type, uint8_t flags, uint8_t payload_len,
                                  const uint8_t *ciphertext, uint8_t *plaintext, const uint8_t *tag) {
   uint8_t nonce[CCM_NONCE_SIZE];
   uint8_t aad[CCM_AAD_SIZE];
   build_ccm_nonce(nonce, src_id, dst_id, frame_counter);
-  build_ccm_aad(aad, pkt_type, src_id, dst_id, frame_counter, payload_len);
+  build_ccm_aad(aad, pkt_type, flags, src_id, dst_id, frame_counter, payload_len);
 
   mbedtls_ccm_context ctx;
   mbedtls_ccm_init(&ctx);

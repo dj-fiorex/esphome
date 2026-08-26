@@ -176,7 +176,7 @@ inline std::vector<uint8_t> make_data(uint32_t fabric_id, uint32_t src_id, uint3
 
   uint8_t ciphertext[esphome::lora_mesh::MESH_MAX_DATA_PAYLOAD_SIZE];
   uint8_t tag[DATA_AUTH_TAG_SIZE];
-  esphome::lora_mesh::mesh_encrypt_payload(fabric_key, src_id, dst_id, frame_counter, PKT_DATA, payload_len,
+  esphome::lora_mesh::mesh_encrypt_payload(fabric_key, src_id, dst_id, frame_counter, PKT_DATA, flags, payload_len,
                                            reinterpret_cast<const uint8_t *>(payload.data()), ciphertext, tag);
   pkt.insert(pkt.end(), ciphertext, ciphertext + payload_len);
   pkt.insert(pkt.end(), tag, tag + DATA_AUTH_TAG_SIZE);

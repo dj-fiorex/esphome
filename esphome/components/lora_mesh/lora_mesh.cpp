@@ -170,6 +170,9 @@ bool LoraMesh::send_message(const std::string &destination, const std::string &p
     return false;
   }
   auto pkt = this->build_data_packet_(dst_id, route->next_hop_id, payload);
+  if (pkt.empty()) {
+    return false;
+  }
   if (!this->enqueue_tx_(pkt)) {
     return false;
   }
@@ -179,6 +182,9 @@ bool LoraMesh::send_message(const std::string &destination, const std::string &p
 
 bool LoraMesh::broadcast_message(const std::string &payload) {
   auto pkt = this->build_data_packet_(MESH_BROADCAST_ID, MESH_BROADCAST_ID, payload);
+  if (pkt.empty()) {
+    return false;
+  }
   if (!this->enqueue_tx_(pkt)) {
     return false;
   }
@@ -193,6 +199,9 @@ bool LoraMesh::send_to_gateway(const std::string &payload) {
     return false;
   }
   auto pkt = this->build_data_packet_(gw->dst_id, gw->next_hop_id, payload);
+  if (pkt.empty()) {
+    return false;
+  }
   if (!this->enqueue_tx_(pkt)) {
     return false;
   }
@@ -447,25 +456,32 @@ void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset,
 void LoraMesh::process_data_(const uint8_t *pkt, size_t pkt_len, size_t offset, uint32_t src_id, uint32_t dst_id,
                              uint32_t frame_counter, uint8_t ttl, uint8_t hop_count, uint32_t prev_hop,
                              uint32_t next_hop, uint8_t flags, float rssi, float snr) {
-  bool is_broadcast = (dst_id == MESH_BROADCAST_ID) || ((flags & FLAG_IS_BROADCAST) != 0);
+  // Validate the protocol-v4 DATA envelope before delivery or forwarding. This
+  // rejects legacy four-byte tags, truncation, and unauthenticated trailing data.
+  if (pkt_len < offset + 1) {
+    return;
+  }
+  uint8_t payload_len = pkt[offset];
+  size_t payload_start = offset + 1;
+  size_t expected_size = payload_start + payload_len + DATA_AUTH_TAG_SIZE;
+  if (payload_len > MESH_MAX_DATA_PAYLOAD_SIZE || pkt_len != expected_size) {
+    return;
+  }
+
+  bool is_broadcast = dst_id == MESH_BROADCAST_ID;
+  if (is_broadcast != ((flags & FLAG_IS_BROADCAST) != 0)) {
+    return;
+  }
   bool is_for_us = is_broadcast || (dst_id == this->node_id_);
 
   if (is_for_us) {
-    if (pkt_len < offset + 1) {
-      return;
-    }
-    uint8_t payload_len = pkt[offset];
-    size_t payload_start = offset + 1;
-    if (payload_len > MESH_MAX_DATA_PAYLOAD_SIZE || pkt_len < payload_start + payload_len + DATA_AUTH_TAG_SIZE) {
-      return;
-    }
-
     const uint8_t *ciphertext = pkt + payload_start;
     const uint8_t *tag = pkt + payload_start + payload_len;
 
     uint8_t plaintext[MESH_MAX_DATA_PAYLOAD_SIZE];
-    bool tag_ok = mesh_decrypt_payload(this->fabric_key_.data(), src_id, dst_id, frame_counter,
-                                       static_cast<uint8_t>(PacketType::DATA), payload_len, ciphertext, plaintext, tag);
+    bool tag_ok =
+        mesh_decrypt_payload(this->fabric_key_.data(), src_id, dst_id, frame_counter,
+                             static_cast<uint8_t>(PacketType::DATA), flags, payload_len, ciphertext, plaintext, tag);
     if (!tag_ok) {
       ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " authentication failed, dropped", src_id);
     } else {
@@ -617,13 +633,22 @@ Packet LoraMesh::build_data_packet_(uint32_t dst_id, uint32_t next_hop, const st
   // Budget = radio frame limit minus header, payload_len byte, and authentication tag.
   size_t max_pkt = (this->radio_ != nullptr) ? this->radio_->get_max_packet_size() : LORA_MAX_PACKET_SIZE;
   max_pkt = std::min(max_pkt, LORA_MAX_PACKET_SIZE);
+  if (max_pkt < MESH_HEADER_SIZE + 1 + DATA_AUTH_TAG_SIZE) {
+    ESP_LOGE(TAG, "Radio packet limit is too small for encrypted DATA");
+    return {};
+  }
   size_t len = std::min(payload.size(), max_pkt - MESH_HEADER_SIZE - 1 - DATA_AUTH_TAG_SIZE);
   pkt.push_back(static_cast<uint8_t>(len));
 
   uint8_t ciphertext[MESH_MAX_DATA_PAYLOAD_SIZE];
   uint8_t tag[DATA_AUTH_TAG_SIZE];
-  mesh_encrypt_payload(this->fabric_key_.data(), this->node_id_, dst_id, fc, static_cast<uint8_t>(PacketType::DATA),
-                       static_cast<uint8_t>(len), reinterpret_cast<const uint8_t *>(payload.data()), ciphertext, tag);
+  bool encrypted = mesh_encrypt_payload(this->fabric_key_.data(), this->node_id_, dst_id, fc,
+                                        static_cast<uint8_t>(PacketType::DATA), flags, static_cast<uint8_t>(len),
+                                        reinterpret_cast<const uint8_t *>(payload.data()), ciphertext, tag);
+  if (!encrypted) {
+    ESP_LOGE(TAG, "Failed to encrypt DATA packet");
+    return {};
+  }
   for (size_t i = 0; i < len; ++i) {
     pkt.push_back(ciphertext[i]);
   }

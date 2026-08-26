@@ -24,7 +24,7 @@ and has no independent security role.
 |-------:|-----:|-------|-------|
 | 0 | 4 | `fabric_id` | Public ID derived from the Fabric Key. Mismatch means drop. |
 | 4 | 1 | `pkt_type` | `1`=HELLO, `2`=DATA; remaining values are reserved. |
-| 5 | 1 | `flags` | `0x01` gateway, `0x02` broadcast, `0x04` ACK requested, `0x08` forwarded. |
+| 5 | 1 | `flags` | `0x01` gateway, `0x02` broadcast, `0x04` ACK requested, `0x08` forwarded; included in DATA AAD. |
 | 6 | 4 | `src_id` | Origin Node; immutable end to end and included in DATA AAD. |
 | 10 | 4 | `dst_id` | Final destination or `0xFFFFFFFF` broadcast; included in DATA AAD. |
 | 14 | 4 | `frame_counter` | Persistent sender counter; included in the DATA nonce and AAD. |
@@ -33,8 +33,8 @@ and has no independent security role.
 | 20 | 4 | `prev_hop` | Link sender; rewritten on each Forward. |
 | 24 | 4 | `next_hop` | Intended Forwarding Node; `0xFFFFFFFF` for broadcast. |
 
-The mutable routing fields are not in DATA AAD. `src_id`, `dst_id`, `frame_counter`, packet type, and payload
-length are authenticated end to end.
+The mutable routing fields are not in DATA AAD. Flags, `src_id`, `dst_id`, `frame_counter`, packet type, and
+payload length are authenticated end to end.
 
 ## DATA body
 
@@ -45,13 +45,14 @@ length are authenticated end to end.
 ```
 
 The maximum application payload is `255 - 28 - 1 - 8 = 218` bytes. Longer application strings are truncated to
-that supported limit before encryption.
+that supported limit before encryption. The body must have exactly `1 + P + 8` bytes; receivers and relays reject
+truncated bodies, legacy four-byte tags, and trailing bytes before delivery or forwarding.
 
 ### AES-128-CCM construction
 
 - Key: the 16-byte Fabric Key configured at build time.
 - Nonce (13 bytes): `src_id[4] || dst_id[4] || frame_counter[4] || 0x00`.
-- AAD (14 bytes): `pkt_type || src_id || dst_id || frame_counter || payload_len`.
+- AAD (15 bytes): `pkt_type || flags || src_id || dst_id || frame_counter || payload_len`.
 - Authentication tag: eight bytes.
 
 Every DATA send follows this construction. A receiver delivers a payload only after the tag verifies and the

@@ -545,6 +545,10 @@ See [docs/wire-format.md](docs/wire-format.md) for the authoritative specificati
 | 20 | 4 | `prev_hop` | `node_id` hash of the radio-level sender (rewritten on each forward) |
 | 24 | 4 | `next_hop` | Intended forwarder; `0xFFFFFFFF` = any (broadcast/flood). Rewritten on each forward. |
 
+For DATA, the packet type, flags, origin, destination, persistent frame counter, and payload length are
+authenticated as AES-CCM associated data. Relays validate the exact protocol-v4 DATA envelope before forwarding;
+truncated packets, trailing bytes, and legacy four-byte tags are dropped.
+
 ### Forwarding model (single-path unicast)
 
 - **Unicast** DATA is forwarded along a single path: a relay forwards only when it is the
