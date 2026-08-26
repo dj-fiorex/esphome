@@ -1,3 +1,7 @@
+---
+status: superseded by ADR-0008
+---
+
 # Per-group payload cryptography with BLE-provisioned keys
 
 The product is a unified mesh "divided in software" between tenants (condo, museum, etc.), and nodes drive water valves/pumps. On a shared RF medium the only thing preventing one tenant from reading or commanding another tenant's actuators is cryptography; the original cleartext `mesh_secret`→`mesh_id` provided isolation only, not confidentiality or authentication, so any sniffer could spoof a valve command.
