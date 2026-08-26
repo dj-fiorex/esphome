@@ -3,10 +3,6 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
-#ifdef USE_WIFI
-#include "esphome/components/wifi/wifi_component.h"
-#endif
-
 #include <algorithm>
 #include <cinttypes>
 #include <cstdio>
@@ -18,6 +14,12 @@ static const char *const TAG = "lora_mesh";
 
 // NVS key prefixes for preference hashes.
 static const char *const NVS_PREFIX_FRAME_COUNTER = "lora_mesh_fc_";
+
+static bool is_preferred_gateway_route(const RouteEntry &candidate, const RouteEntry *current) {
+  return current == nullptr || candidate.hop_count < current->hop_count ||
+         (candidate.hop_count == current->hop_count &&
+          (candidate.rssi > current->rssi || (candidate.rssi == current->rssi && candidate.dst_id < current->dst_id)));
+}
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
 
@@ -50,6 +52,7 @@ LoraMesh::LoraMesh(const std::string &fabric_key_hex) {
   }
   this->fabric_key_valid_ = true;
   this->fabric_id_ = derive_fabric_id(this->fabric_key_.data());
+  derive_control_plane_key(this->fabric_key_.data(), this->control_plane_key_.data());
 }
 
 // ─── Component lifecycle ──────────────────────────────────────────────────────
@@ -98,32 +101,24 @@ void LoraMesh::setup() {
   // Register as listener on the radio adapter.
   this->radio_->attach_listener(this);
 
-  // Determine initial gateway state.
-  this->acting_as_gateway_ = this->compute_gateway_state_();
-  this->last_gateway_available_ = this->has_gateway();
-
   // Stagger the first HELLO by a random offset so devices booted simultaneously
   // do not collide on the channel.
   uint32_t jitter_ms = static_cast<uint32_t>(random_uint32() % (this->discovery_interval_ms_ / 5));
   this->last_hello_ = millis() - this->discovery_interval_ms_ + jitter_ms;
+  this->setup_complete_ = true;
 
-  ESP_LOGI(TAG, "LoraMesh setup: node_id=%s (0x%08" PRIX32 ") fabric_id=0x%08" PRIX32 " gw=%s",
-           this->node_id_str_.c_str(), this->node_id_, this->fabric_id_, this->acting_as_gateway_ ? "yes" : "no");
+  ESP_LOGI(TAG, "LoraMesh setup: node_id=%s (0x%08" PRIX32 ") fabric_id=0x%08" PRIX32 " upstream=%s",
+           this->node_id_str_.c_str(), this->node_id_, this->fabric_id_, this->upstream_connected_ ? "yes" : "no");
 }
 
 void LoraMesh::loop() {
   uint32_t now = millis();
 
-  // Update gateway state for AUTO mode.
-  this->update_gateway_state_();
-
-  // Periodic HELLO beacon.
+  // Periodic and transition-triggered HELLOs share one coalesced, rate-limited path.
   if (now - this->last_hello_ >= this->discovery_interval_ms_) {
-    this->last_hello_ = now;
-    auto pkt = this->build_hello_packet_();
-    this->enqueue_tx_(pkt);
-    ESP_LOGD(TAG, "HELLO queued (%zu bytes)", pkt.size());
+    this->hello_update_pending_ = true;
   }
+  this->queue_pending_hello_(now);
 
   // Route and seen-cache expiry (every 10 s).
   if (now - this->last_expire_check_ >= 10000) {
@@ -145,11 +140,7 @@ void LoraMesh::loop() {
 void LoraMesh::dump_config() {
   ESP_LOGCONFIG(TAG, "LoraMesh:");
   ESP_LOGCONFIG(TAG, "  Node ID: %s (0x%08" PRIX32 ")", this->node_id_str_.c_str(), this->node_id_);
-  ESP_LOGCONFIG(TAG, "  Gateway mode: %s",
-                this->gateway_mode_ == GatewayMode::NORMAL    ? "normal"
-                : this->gateway_mode_ == GatewayMode::GATEWAY ? "gateway"
-                                                              : "auto");
-  ESP_LOGCONFIG(TAG, "  Acting as gateway: %s", this->acting_as_gateway_ ? "yes" : "no");
+  ESP_LOGCONFIG(TAG, "  Upstream connectivity: %s", this->upstream_connected_ ? "connected" : "disconnected");
   ESP_LOGCONFIG(TAG, "  Max hops: %u", this->max_hops_);
   ESP_LOGCONFIG(TAG, "  Discovery interval: %" PRIu32 " ms", this->discovery_interval_ms_);
   ESP_LOGCONFIG(TAG, "  Route TTL: %" PRIu32 " ms", this->route_ttl_ms_);
@@ -193,7 +184,7 @@ bool LoraMesh::broadcast_message(const std::string &payload) {
 }
 
 bool LoraMesh::send_to_gateway(const std::string &payload) {
-  const RouteEntry *gw = this->find_best_gateway_route_();
+  const RouteEntry *gw = this->find_nearest_gateway_route_();
   if (gw == nullptr) {
     ESP_LOGW(TAG, "send_to_gateway: no gateway in routing table");
     return false;
@@ -209,12 +200,23 @@ bool LoraMesh::send_to_gateway(const std::string &payload) {
   return true;
 }
 
+void LoraMesh::set_upstream_connected(bool connected) {
+  if (connected == this->upstream_connected_) {
+    return;
+  }
+  this->upstream_connected_ = connected;
+  ESP_LOGI(TAG, "Upstream connectivity changed → %s", connected ? "connected" : "disconnected");
+  if (this->setup_complete_) {
+    this->schedule_hello_update_();
+  }
+}
+
 bool LoraMesh::has_route(const std::string &node_id) const { return this->find_route_(fnv1a_str(node_id)) != nullptr; }
 
-bool LoraMesh::has_gateway() const { return this->find_best_gateway_route_() != nullptr; }
+bool LoraMesh::has_gateway() const { return this->find_nearest_gateway_route_() != nullptr; }
 
-std::string LoraMesh::get_best_gateway() const {
-  const RouteEntry *gw = this->find_best_gateway_route_();
+std::string LoraMesh::get_nearest_gateway() const {
+  const RouteEntry *gw = this->find_nearest_gateway_route_();
   if (gw == nullptr) {
     return {};
   }
@@ -368,6 +370,26 @@ void LoraMesh::on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, f
     return;
   }
 
+  // Reject unsupported or malformed packet types before duplicate suppression.
+  // In particular, changing an authenticated HELLO's type byte must not let the
+  // forged frame reserve its source/counter pair in the Seen-cache.
+  switch (pkt_type) {
+    case PacketType::HELLO:
+      if (!this->validate_hello_packet_(pkt, pkt_len)) {
+        ESP_LOGD(TAG, "HELLO from 0x%08" PRIX32 " failed validation or authentication", src_id);
+        return;
+      }
+      break;
+    case PacketType::DATA:
+      if (!this->validate_data_envelope_(pkt, pkt_len, dst_id, flags)) {
+        return;
+      }
+      break;
+    default:
+      ESP_LOGD(TAG, "Unhandled packet type %u from 0x%08" PRIX32, static_cast<uint8_t>(pkt_type), src_id);
+      return;
+  }
+
   // Duplicate suppression.
   if (this->is_duplicate_(src_id, frame_counter)) {
     ESP_LOGV(TAG, "Duplicate from 0x%08" PRIX32 " frame=%" PRIu32 ", dropped", src_id, frame_counter);
@@ -392,6 +414,61 @@ void LoraMesh::on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, f
 }
 
 // ─── HELLO processing ─────────────────────────────────────────────────────────
+
+bool LoraMesh::validate_hello_packet_(const uint8_t *pkt, size_t pkt_len) const {
+  constexpr size_t minimum_size = MESH_HEADER_SIZE + 3 + HELLO_AUTH_TAG_SIZE;
+  if (pkt_len < minimum_size) {
+    return false;
+  }
+  size_t authenticated_size = pkt_len - HELLO_AUTH_TAG_SIZE;
+  size_t offset = MESH_HEADER_SIZE;
+  if (pkt[offset] != MESH_PROTO_VERSION) {
+    return false;
+  }
+  uint8_t flags = pkt[MESH_OFF_FLAGS];
+  uint32_t src_id = get_u32_le(pkt + MESH_OFF_SRC_ID);
+  if ((flags & ~FLAG_IS_GATEWAY) != 0 || get_u32_le(pkt + MESH_OFF_DST_ID) != MESH_BROADCAST_ID ||
+      pkt[MESH_OFF_TTL] == 0 || pkt[MESH_OFF_HOP_COUNT] != 0 || get_u32_le(pkt + MESH_OFF_PREV_HOP) != src_id ||
+      get_u32_le(pkt + MESH_OFF_NEXT_HOP) != MESH_BROADCAST_ID) {
+    return false;
+  }
+  uint8_t name_len = pkt[offset + 1];
+  if (name_len > MESH_NODE_NAME_MAX_LEN) {
+    return false;
+  }
+  size_t route_count_offset = offset + 2 + static_cast<size_t>(name_len);
+  if (route_count_offset >= authenticated_size) {
+    return false;
+  }
+  uint8_t route_count = pkt[route_count_offset];
+  size_t expected_size = route_count_offset + 1 + static_cast<size_t>(route_count) * ROUTE_ADV_SIZE;
+  if (expected_size != authenticated_size) {
+    return false;
+  }
+  for (size_t pos = route_count_offset + 1; pos < authenticated_size; pos += ROUTE_ADV_SIZE) {
+    uint32_t advertised_destination = get_u32_le(pkt + pos);
+    uint8_t advertised_hops = pkt[pos + 4];
+    uint8_t route_flags = pkt[pos + 6];
+    if (advertised_destination == MESH_BROADCAST_ID || advertised_destination == src_id || advertised_hops == 0 ||
+        advertised_hops == UINT8_MAX || (route_flags & ~ROUTE_FLAG_IS_GATEWAY) != 0) {
+      return false;
+    }
+  }
+  return verify_hello_auth_tag(this->control_plane_key_.data(), pkt, authenticated_size, pkt + authenticated_size);
+}
+
+bool LoraMesh::validate_data_envelope_(const uint8_t *pkt, size_t pkt_len, uint32_t dst_id, uint8_t flags) const {
+  if (pkt_len < MESH_HEADER_SIZE + 1) {
+    return false;
+  }
+  uint8_t payload_len = pkt[MESH_HEADER_SIZE];
+  size_t expected_size = MESH_HEADER_SIZE + 1 + payload_len + DATA_AUTH_TAG_SIZE;
+  if (payload_len > MESH_MAX_DATA_PAYLOAD_SIZE || pkt_len != expected_size) {
+    return false;
+  }
+  bool is_broadcast = dst_id == MESH_BROADCAST_ID;
+  return is_broadcast == ((flags & FLAG_IS_BROADCAST) != 0);
+}
 
 void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset, uint32_t src_id, bool src_is_gateway,
                               uint32_t prev_hop, float rssi, float snr) {
@@ -422,15 +499,18 @@ void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset,
 
   uint8_t route_count = pkt[offset + 2 + name_len];
   size_t pos = offset + 3 + name_len;
+  size_t authenticated_size = pkt_len - HELLO_AUTH_TAG_SIZE;
 
-  for (uint8_t i = 0; i < route_count && pos + ROUTE_ADV_SIZE <= pkt_len; ++i, pos += ROUTE_ADV_SIZE) {
+  for (uint8_t i = 0; i < route_count && pos + ROUTE_ADV_SIZE <= authenticated_size; ++i, pos += ROUTE_ADV_SIZE) {
     uint32_t adv_dst = get_u32_le(pkt + pos);
     uint8_t adv_hops = pkt[pos + 4];
+    float advertised_rssi = static_cast<float>(static_cast<int8_t>(pkt[pos + 5]));
+    bool advertised_gateway = (pkt[pos + 6] & ROUTE_FLAG_IS_GATEWAY) != 0;
 
     if (adv_dst == this->node_id_ || adv_dst == src_id) {
       continue;
     }
-    uint8_t new_hops = static_cast<uint8_t>(adv_hops + 1);
+    uint16_t new_hops = static_cast<uint16_t>(adv_hops) + 1;
     if (new_hops > this->max_hops_) {
       continue;
     }
@@ -441,7 +521,8 @@ void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset,
     bool better = existing == nullptr || new_hops < existing->hop_count;
     bool reconfirmed = existing != nullptr && existing->next_hop_id == src_id && new_hops == existing->hop_count;
     if (better || reconfirmed) {
-      this->update_route_(adv_dst, src_id, new_hops, false, rssi, snr);
+      this->update_route_(adv_dst, src_id, static_cast<uint8_t>(new_hops), advertised_gateway,
+                          std::min(advertised_rssi, rssi), snr);
     }
   }
 
@@ -573,7 +654,7 @@ Packet LoraMesh::build_header_(PacketType type, uint8_t flags, uint32_t dst_id, 
 }
 
 Packet LoraMesh::build_hello_packet_() {
-  uint8_t flags = this->acting_as_gateway_ ? FLAG_IS_GATEWAY : 0;
+  uint8_t flags = this->upstream_connected_ ? FLAG_IS_GATEWAY : 0;
 
   // Collect valid routes, sorted by hop_count ascending.
   static_assert(LORA_MESH_MAX_ROUTES <= 255, "LORA_MESH_MAX_ROUTES must be <= 255");
@@ -592,7 +673,8 @@ Packet LoraMesh::build_hello_packet_() {
   // Overhead = proto_version(1) + name_len_field(1) + name(name_len) + route_count(1).
   size_t hello_overhead = 3 + name_len;
   size_t max_pkt = (this->radio_ != nullptr) ? this->radio_->get_max_packet_size() : 255;
-  size_t budget = (max_pkt > MESH_HEADER_SIZE + hello_overhead) ? max_pkt - MESH_HEADER_SIZE - hello_overhead : 0;
+  size_t fixed_size = MESH_HEADER_SIZE + hello_overhead + HELLO_AUTH_TAG_SIZE;
+  size_t budget = max_pkt > fixed_size ? max_pkt - fixed_size : 0;
   size_t max_routes = std::min(budget / ROUTE_ADV_SIZE, count);
   if (max_routes > 255) {
     max_routes = 255;
@@ -616,15 +698,21 @@ Packet LoraMesh::build_hello_packet_() {
     int clamped = static_cast<int>(r->rssi);
     clamped = (clamped < -128) ? -128 : (clamped > 127) ? 127 : clamped;
     entry[5] = static_cast<uint8_t>(static_cast<int8_t>(clamped));
+    entry[6] = r->is_gateway ? ROUTE_FLAG_IS_GATEWAY : 0;
     for (uint8_t b : entry) {
       pkt.push_back(b);
     }
+  }
+  uint8_t tag[HELLO_AUTH_TAG_SIZE];
+  compute_hello_auth_tag(this->control_plane_key_.data(), pkt.data(), pkt.size(), tag);
+  for (uint8_t byte : tag) {
+    pkt.push_back(byte);
   }
   return pkt;
 }
 
 Packet LoraMesh::build_data_packet_(uint32_t dst_id, uint32_t next_hop, const std::string &payload) {
-  uint8_t flags = this->acting_as_gateway_ ? FLAG_IS_GATEWAY : 0;
+  uint8_t flags = this->upstream_connected_ ? FLAG_IS_GATEWAY : 0;
   if (dst_id == MESH_BROADCAST_ID) {
     flags |= FLAG_IS_BROADCAST;
   }
@@ -693,6 +781,20 @@ void LoraMesh::drain_tx_queue_(uint32_t now) {
   this->tx_backoff_armed_ = false;
 }
 
+void LoraMesh::schedule_hello_update_() { this->hello_update_pending_ = true; }
+
+void LoraMesh::queue_pending_hello_(uint32_t now) {
+  if (!this->hello_update_pending_ || now - this->last_hello_ < HELLO_UPDATE_MIN_INTERVAL_MS) {
+    return;
+  }
+  auto pkt = this->build_hello_packet_();
+  if (this->enqueue_tx_(pkt)) {
+    this->hello_update_pending_ = false;
+    this->last_hello_ = now;
+    ESP_LOGD(TAG, "HELLO queued (%zu bytes)", pkt.size());
+  }
+}
+
 // ─── Routing table ────────────────────────────────────────────────────────────
 
 RouteEntry *LoraMesh::find_route_(uint32_t dst_id) {
@@ -713,30 +815,30 @@ const RouteEntry *LoraMesh::find_route_(uint32_t dst_id) const {
   return nullptr;
 }
 
-RouteEntry *LoraMesh::find_best_gateway_route_() {
-  RouteEntry *best = nullptr;
+RouteEntry *LoraMesh::find_nearest_gateway_route_() {
+  RouteEntry *nearest = nullptr;
   for (auto &r : this->routes_) {
     if (!r.is_valid || !r.is_gateway) {
       continue;
     }
-    if (best == nullptr || r.hop_count < best->hop_count || (r.hop_count == best->hop_count && r.rssi > best->rssi)) {
-      best = &r;
+    if (is_preferred_gateway_route(r, nearest)) {
+      nearest = &r;
     }
   }
-  return best;
+  return nearest;
 }
 
-const RouteEntry *LoraMesh::find_best_gateway_route_() const {
-  const RouteEntry *best = nullptr;
+const RouteEntry *LoraMesh::find_nearest_gateway_route_() const {
+  const RouteEntry *nearest = nullptr;
   for (const auto &r : this->routes_) {
     if (!r.is_valid || !r.is_gateway) {
       continue;
     }
-    if (best == nullptr || r.hop_count < best->hop_count || (r.hop_count == best->hop_count && r.rssi > best->rssi)) {
-      best = &r;
+    if (is_preferred_gateway_route(r, nearest)) {
+      nearest = &r;
     }
   }
-  return best;
+  return nearest;
 }
 
 RouteEntry *LoraMesh::alloc_route_slot_() {
@@ -764,6 +866,7 @@ void LoraMesh::update_route_(uint32_t dst_id, uint32_t next_hop, uint8_t hops, b
   uint32_t now = millis();
   RouteEntry *r = this->find_route_(dst_id);
   bool changed = false;
+  bool gateway_changed = false;
   if (r == nullptr) {
     r = this->alloc_route_slot_();
     if (r == nullptr) {
@@ -786,12 +889,16 @@ void LoraMesh::update_route_(uint32_t dst_id, uint32_t next_hop, uint8_t hops, b
   if (r->is_gateway != is_gw) {
     r->is_gateway = is_gw;
     changed = true;
+    gateway_changed = true;
   }
   r->is_valid = true;
   r->last_seen = now;
   r->expires_at = now + this->route_ttl_ms_;
   if (changed) {
     this->notify_route_changed_();
+  }
+  if (gateway_changed) {
+    this->schedule_hello_update_();
   }
 }
 
@@ -907,38 +1014,6 @@ void LoraMesh::expire_seen_() {
   }
 }
 
-// ─── Gateway mode ─────────────────────────────────────────────────────────────
-
-bool LoraMesh::compute_gateway_state_() const {
-  switch (this->gateway_mode_) {
-    case GatewayMode::NORMAL:
-      return false;
-    case GatewayMode::GATEWAY:
-      return true;
-    case GatewayMode::AUTO:
-#ifdef USE_WIFI
-      return wifi::global_wifi_component != nullptr && wifi::global_wifi_component->is_connected();
-#else
-      return false;
-#endif
-    default:
-      return false;
-  }
-}
-
-void LoraMesh::update_gateway_state_() {
-  bool new_state = this->compute_gateway_state_();
-  if (new_state == this->acting_as_gateway_) {
-    return;
-  }
-  this->acting_as_gateway_ = new_state;
-  ESP_LOGI(TAG, "Gateway state changed → %s", new_state ? "GATEWAY" : "node");
-  this->gateway_changed_callback_();
-  // Queue a HELLO right away so neighbours learn the new state quickly.
-  auto pkt = this->build_hello_packet_();
-  this->enqueue_tx_(pkt);
-}
-
 // ─── Diagnostics ──────────────────────────────────────────────────────────────
 
 void LoraMesh::publish_diagnostics_() {
@@ -949,15 +1024,15 @@ void LoraMesh::publish_diagnostics_() {
 #endif
 #ifdef USE_BINARY_SENSOR
   if (this->gateway_available_sensor_ != nullptr) {
-    this->gateway_available_sensor_->publish_state(this->has_gateway() || this->acting_as_gateway_);
+    this->gateway_available_sensor_->publish_state(this->has_gateway() || this->upstream_connected_);
   }
 #endif
 #ifdef USE_TEXT_SENSOR
   if (this->routing_table_sensor_ != nullptr) {
     this->routing_table_sensor_->publish_state(this->get_routing_table_json());
   }
-  if (this->best_gateway_sensor_ != nullptr) {
-    this->best_gateway_sensor_->publish_state(this->get_best_gateway());
+  if (this->nearest_gateway_sensor_ != nullptr) {
+    this->nearest_gateway_sensor_->publish_state(this->get_nearest_gateway());
   }
 #endif
 }

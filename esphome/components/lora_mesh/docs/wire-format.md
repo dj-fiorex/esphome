@@ -1,8 +1,8 @@
 # lora_mesh wire format (protocol version 4)
 
 Protocol version 4 uses one mandatory 128-bit Fabric Key. The key is never sent on air. It derives the public
-Fabric ID and authenticates-encrypts every DATA payload. There is no Group identifier, unprovisioned state,
-plaintext DATA mode, or version-3 compatibility path.
+Fabric ID, authenticates-encrypts every DATA payload, and derives a separate key for authenticated HELLO traffic.
+There is no Group identifier, unprovisioned state, plaintext DATA mode, or version-3 compatibility path.
 
 All multi-byte integers are little-endian. Node identities are 32-bit FNV-1a hashes of Node ID strings.
 
@@ -24,7 +24,7 @@ and has no independent security role.
 |-------:|-----:|-------|-------|
 | 0 | 4 | `fabric_id` | Public ID derived from the Fabric Key. Mismatch means drop. |
 | 4 | 1 | `pkt_type` | `1`=HELLO, `2`=DATA; remaining values are reserved. |
-| 5 | 1 | `flags` | `0x01` gateway, `0x02` broadcast, `0x04` ACK requested, `0x08` forwarded; included in DATA AAD. |
+| 5 | 1 | `flags` | `0x01` sender has Upstream Connectivity, `0x02` broadcast, `0x04` ACK requested, `0x08` forwarded. |
 | 6 | 4 | `src_id` | Origin Node; immutable end to end and included in DATA AAD. |
 | 10 | 4 | `dst_id` | Final destination or `0xFFFFFFFF` broadcast; included in DATA AAD. |
 | 14 | 4 | `frame_counter` | Persistent sender counter; included in the DATA nonce and AAD. |
@@ -33,8 +33,9 @@ and has no independent security role.
 | 20 | 4 | `prev_hop` | Link sender; rewritten on each Forward. |
 | 24 | 4 | `next_hop` | Intended Forwarding Node; `0xFFFFFFFF` for broadcast. |
 
-The mutable routing fields are not in DATA AAD. Flags, `src_id`, `dst_id`, `frame_counter`, packet type, and
-payload length are authenticated end to end.
+The mutable routing fields are not in DATA AAD. Flags, `src_id`, `dst_id`, `frame_counter`, packet type, and payload
+length are authenticated end to end for DATA. Every header byte is authenticated for HELLO because HELLO is never
+Forwarded.
 
 ## DATA body
 
@@ -66,12 +67,23 @@ application callback.
 [29]          name_len      (1)   N (0..32)
 [30]          node_name     (N)   not NUL-terminated
 [30+N]        route_count   (1)   R
-[31+N]        routes        (R*6) RouteAdvertisement[]
+[31+N]        routes        (R*7) RouteAdvertisement[]
+[31+N+R*7]    tag           (8)   truncated HMAC-SHA256
 ```
 
-A Route advertisement is `dest_id[4] || hop_count[1] || rssi_scaled[1]`. HELLO is single-hop and never
-Forwarded. A HELLO whose protocol byte is not 4 is rejected before it can create a direct or advertised Route.
-HELLO authentication is outside the DATA-security contract implemented here.
+A Route advertisement is `dest_id[4] || hop_count[1] || path_rssi[1] || route_flags[1]`. Route flag bit `0x01`
+means the destination advertises Upstream Connectivity and is therefore a Gateway. Path RSSI is a signed dBm value;
+receivers extend a Route with the minimum of this advertised value and the newly measured link RSSI.
+
+The control-plane key is `HMAC-SHA256(Fabric Key, "LORA-MESH-CONTROL-v1")`. The HELLO tag is the first eight bytes
+of `HMAC-SHA256(control-plane key, complete 28-byte header || complete HELLO body)`. Routing metadata stays visible.
+
+HELLO is single-hop and never Forwarded. Its destination and Next Hop are broadcast, its Previous Hop equals its
+source, its hop count is zero, and only the Upstream Connectivity flag is valid. Advertisements use a non-broadcast
+destination, a hop count in `[1, 254]`, and only the Gateway Route flag. A receiver requires these invariants,
+protocol version 4, a Node name no longer than 32 bytes, the exact packet length implied by Route count, and a valid
+tag before it updates duplicate suppression, Node names, direct or advertised Routes, Gateway visibility,
+diagnostics, or callbacks.
 
 ## Persistent counters and replay protection
 
@@ -86,10 +98,11 @@ runtime-only; durable application command sequencing owns reboot-safe actuator i
 ## Receive and Forwarding summary
 
 1. Reject a mismatched Fabric ID or the Node's own echoed source ID.
-2. Reject an already-seen `(src_id, frame_counter)` pair.
-3. For HELLO, require protocol version 4 before changing Route or name state.
-4. For DATA addressed to this Node or broadcast, verify/decrypt with the Fabric Key, replay-check, then deliver.
-5. Forward eligible DATA by copying the authenticated-encrypted body unchanged and rewriting only `ttl`,
+2. For HELLO, validate its version, exact shape, and HMAC before consulting or changing the Seen-cache.
+3. Reject an already-seen `(src_id, frame_counter)` pair.
+4. For authenticated HELLO, update direct and advertised Routes and Node names.
+5. For DATA addressed to this Node or broadcast, verify/decrypt with the Fabric Key, replay-check, then deliver.
+6. Forward eligible DATA by copying the authenticated-encrypted body unchanged and rewriting only `ttl`,
    `hop_count`, `prev_hop`, and `next_hop`.
 
 Unicast remains single-path through the designated Next Hop. Broadcast remains flood-based. Both carry only

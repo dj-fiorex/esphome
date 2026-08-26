@@ -5,8 +5,8 @@
 #  - Normal node: receives messages, sends unicast and broadcast
 #  - on_message automation
 #  - on_route_update automation
-#  - on_gateway_changed automation
-#  - Actions: lora_mesh.send, lora_mesh.broadcast, lora_mesh.send_to_gateway
+#  - Actions: lora_mesh.send, lora_mesh.broadcast, lora_mesh.send_to_gateway,
+#    and templatable lora_mesh.set_upstream_connected
 
 lora_mesh:
   id: mesh
@@ -14,7 +14,6 @@ lora_mesh:
   node_id: !lambda 'return std::string("test-001");'
   # Deterministic test-only key; production configurations should use !secret.
   fabric_key: "00000000000000000000000000000000"
-  gateway: normal
   max_hops: 8
   discovery_interval: 30s
   route_ttl: 5min
@@ -33,10 +32,6 @@ lora_mesh:
   on_route_update:
     then:
       - lambda: 'ESP_LOGI("mesh", "Routing table changed, nodes: %zu", id(mesh).get_known_node_count());'
-
-  on_gateway_changed:
-    then:
-      - lambda: 'ESP_LOGI("mesh", "Gateway state changed");'
 
 button:
   - platform: template
@@ -67,3 +62,10 @@ button:
       - lora_mesh.send_to_gateway:
           id: mesh
           payload: !lambda 'return std::string("value=42");'
+
+  - platform: template
+    name: "Set templated upstream state"
+    on_press:
+      - lora_mesh.set_upstream_connected:
+          id: mesh
+          connected: !lambda "return !id(mesh).is_upstream_connected();"

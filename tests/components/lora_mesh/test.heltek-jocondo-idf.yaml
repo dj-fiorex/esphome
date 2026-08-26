@@ -78,6 +78,20 @@ switch:
     optimistic: true
     restore_mode: ALWAYS_ON
 
+  - platform: template
+    name: "Upstream Connectivity"
+    id: upstream_connectivity
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - lora_mesh.set_upstream_connected:
+          id: mesh
+          connected: true
+    turn_off_action:
+      - lora_mesh.set_upstream_connected:
+          id: mesh
+          connected: false
+
 # On-board OLED I2C bus
 i2c:
   - sda: GPIO17
@@ -131,7 +145,6 @@ lora_mesh:
   node_id: !lambda "return App.get_name();"
   # Deterministic test-only key; production configurations should use !secret.
   fabric_key: "00000000000000000000000000000000"
-  gateway: normal
   link_sim: true
   # Test-tuned timings: fast convergence + prompt expiry so multi-hop and
   # self-healing are observable in tens of seconds (production defaults are
@@ -143,7 +156,7 @@ lora_mesh:
   node_count_sensor_id: mesh_node_count
   gateway_available_sensor_id: mesh_gateway_available
   routing_table_sensor_id: mesh_routing_table
-  best_gateway_sensor_id: mesh_best_gateway
+  nearest_gateway_sensor_id: mesh_nearest_gateway
 
   on_message:
     then:
@@ -160,10 +173,6 @@ lora_mesh:
   on_route_update:
     then:
       - lambda: 'ESP_LOGI("mesh", "Routes changed, known nodes: %zu", id(mesh).get_known_node_count());'
-
-  on_gateway_changed:
-    then:
-      - lambda: 'ESP_LOGI("mesh", "Gateway availability changed");'
 
 # ── Diagnostics (published by the component) ─────────────────────────────────
 sensor:
@@ -186,8 +195,8 @@ text_sensor:
     icon: "mdi:table-network"
 
   - platform: template
-    name: "Mesh best gateway"
-    id: mesh_best_gateway
+    name: "Mesh nearest gateway"
+    id: mesh_nearest_gateway
     icon: "mdi:router-network"
 
   # Test-only diagnostics driven by lambdas / on_message.
@@ -206,27 +215,6 @@ text_sensor:
   - platform: template
     name: "Last message"
     id: last_message
-
-# ── Runtime controls (web UI) ────────────────────────────────────────────────
-select:
-  - platform: template
-    name: "Gateway mode"
-    id: gateway_mode_select
-    optimistic: true
-    initial_option: "normal"
-    options:
-      - "normal"
-      - "gateway"
-      - "auto"
-    set_action:
-      - lambda: |-
-          if (x == "gateway") {
-            id(mesh).set_gateway_mode(esphome::lora_mesh::GatewayMode::GATEWAY);
-          } else if (x == "auto") {
-            id(mesh).set_gateway_mode(esphome::lora_mesh::GatewayMode::AUTO);
-          } else {
-            id(mesh).set_gateway_mode(esphome::lora_mesh::GatewayMode::NORMAL);
-          }
 
 text:
   - platform: template
@@ -287,7 +275,7 @@ interval:
               - switch.is_on: auto_traffic
               # A gateway is the convergecast sink, not a source — sending to a
               # gateway from a node that is itself a gateway is meaningless.
-              - lambda: "return !id(mesh).is_gateway();"
+              - lambda: "return !id(mesh).is_upstream_connected();"
           then:
             - lora_mesh.send_to_gateway:
                 id: mesh
@@ -325,7 +313,7 @@ display:
           it.printf(0, 0, id(roboto), "%s", id(mesh).get_node_id().c_str());
           it.printf(0, 12, id(roboto), "Nodes: %zu", id(mesh).get_known_node_count());
           it.printf(0, 24, id(roboto), "GW reach: %s", id(mesh).has_gateway() ? "yes" : "no");
-          it.printf(0, 36, id(roboto), "Self GW: %s", id(mesh).is_gateway() ? "yes" : "no");
+          it.printf(0, 36, id(roboto), "Upstream: %s", id(mesh).is_upstream_connected() ? "yes" : "no");
           it.printf(0, 48, id(roboto), "%s", id(last_message).state.c_str());
 
 # Buzzer — short audible cue on message receive (handy when handling boards).

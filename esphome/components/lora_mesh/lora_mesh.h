@@ -44,7 +44,7 @@ class LoraMesh : public Component {
   void setup() override;
   void loop() override;
   void dump_config() override;
-  float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
+  float get_setup_priority() const override { return setup_priority::PROCESSOR - 1.0f; }
 
   // ── Configuration setters (called from Python codegen) ────────────────
   void set_radio(LoRaRadio *radio) { this->radio_ = radio; }
@@ -52,7 +52,6 @@ class LoraMesh : public Component {
     this->node_id_template_ = node_id;
     this->has_node_id_ = true;
   }
-  void set_gateway_mode(GatewayMode mode) { this->gateway_mode_ = mode; }
   void set_max_hops(uint8_t max_hops) { this->max_hops_ = max_hops; }
   void set_discovery_interval(uint32_t ms) { this->discovery_interval_ms_ = ms; }
   void set_route_ttl(uint32_t ms) { this->route_ttl_ms_ = ms; }
@@ -64,11 +63,12 @@ class LoraMesh : public Component {
   bool send_message(const std::string &destination, const std::string &payload);
   bool broadcast_message(const std::string &payload);
   bool send_to_gateway(const std::string &payload);
+  void set_upstream_connected(bool connected);
   bool has_route(const std::string &node_id) const;
   bool has_gateway() const;
-  std::string get_best_gateway() const;
+  std::string get_nearest_gateway() const;
   std::string get_node_id() const { return this->node_id_str_; }
-  bool is_gateway() const { return this->acting_as_gateway_; }
+  bool is_upstream_connected() const { return this->upstream_connected_; }
   /** Returns the human-readable name for a node hash, or nullptr if unknown. */
   const char *get_node_name(uint32_t id) const;
   void clear_routes();
@@ -104,11 +104,6 @@ class LoraMesh : public Component {
     this->route_update_callback_.add(std::forward<F>(callback));
   }
 
-  /** Called when the gateway-available state changes. */
-  template<typename F> void add_on_gateway_changed_callback(F &&callback) {
-    this->gateway_changed_callback_.add(std::forward<F>(callback));
-  }
-
   // ── Optional diagnostic sensors ──────────────────────────────────────
 #ifdef USE_SENSOR
   void set_node_count_sensor(sensor::Sensor *s) { this->node_count_sensor_ = s; }
@@ -118,7 +113,7 @@ class LoraMesh : public Component {
 #endif
 #ifdef USE_TEXT_SENSOR
   void set_routing_table_sensor(text_sensor::TextSensor *s) { this->routing_table_sensor_ = s; }
-  void set_best_gateway_sensor(text_sensor::TextSensor *s) { this->best_gateway_sensor_ = s; }
+  void set_nearest_gateway_sensor(text_sensor::TextSensor *s) { this->nearest_gateway_sensor_ = s; }
 #endif
 
  protected:
@@ -127,6 +122,8 @@ class LoraMesh : public Component {
                        uint8_t hop_count, uint32_t prev_hop, uint32_t next_hop) const;
   Packet build_hello_packet_();
   Packet build_data_packet_(uint32_t dst_id, uint32_t next_hop, const std::string &payload);
+  bool validate_hello_packet_(const uint8_t *pkt, size_t pkt_len) const;
+  bool validate_data_envelope_(const uint8_t *pkt, size_t pkt_len, uint32_t dst_id, uint8_t flags) const;
 
   // ── Outgoing TX queue (issue #12) ─────────────────────────────────────
   // All outbound packets are enqueued here and drained at most one per
@@ -135,6 +132,8 @@ class LoraMesh : public Component {
   // poor-man's CSMA against simultaneous relays.
   bool enqueue_tx_(const Packet &pkt);
   void drain_tx_queue_(uint32_t now);
+  void schedule_hello_update_();
+  void queue_pending_hello_(uint32_t now);
 
   // ── Packet processing ──────────────────────────────────────────────────
   void process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset, uint32_t src_id, bool src_is_gateway,
@@ -146,8 +145,8 @@ class LoraMesh : public Component {
   // ── Routing helpers ────────────────────────────────────────────────────
   RouteEntry *find_route_(uint32_t dst_id);
   const RouteEntry *find_route_(uint32_t dst_id) const;
-  RouteEntry *find_best_gateway_route_();
-  const RouteEntry *find_best_gateway_route_() const;
+  RouteEntry *find_nearest_gateway_route_();
+  const RouteEntry *find_nearest_gateway_route_() const;
   void update_route_(uint32_t dst_id, uint32_t next_hop, uint8_t hops, bool is_gw, float rssi, float snr);
   RouteEntry *alloc_route_slot_();
   void expire_routes_();
@@ -168,10 +167,6 @@ class LoraMesh : public Component {
   // ── Node name cache ────────────────────────────────────────────────────
   void store_node_name_(uint32_t id, const char *name, uint8_t name_len);
   const char *lookup_node_name_(uint32_t id) const;
-
-  // ── Gateway mode ──────────────────────────────────────────────────────
-  bool compute_gateway_state_() const;
-  void update_gateway_state_();
 
   // ── Diagnostics ───────────────────────────────────────────────────────
   void publish_diagnostics_();
@@ -195,6 +190,7 @@ class LoraMesh : public Component {
   // domain-separated derivation of this immutable, validated key.
   uint32_t fabric_id_{0};
   std::array<uint8_t, FABRIC_KEY_SIZE> fabric_key_{};
+  std::array<uint8_t, CONTROL_PLANE_KEY_SIZE> control_plane_key_{};
   bool fabric_key_valid_{false};
 
  protected:
@@ -204,9 +200,9 @@ class LoraMesh : public Component {
   std::string node_id_str_;
   TemplatableValue<std::string> node_id_template_;
   bool has_node_id_{false};
-  GatewayMode gateway_mode_{GatewayMode::NORMAL};
-  bool acting_as_gateway_{false};
-  bool last_gateway_available_{false};
+  bool upstream_connected_{false};
+  bool setup_complete_{false};
+  bool hello_update_pending_{false};
   uint8_t max_hops_{8};
   uint32_t discovery_interval_ms_{30000};
   uint32_t route_ttl_ms_{300000};
@@ -216,6 +212,7 @@ class LoraMesh : public Component {
   uint32_t last_hello_{0};
   uint32_t last_expire_check_{0};
   uint32_t last_diag_publish_{0};
+  static constexpr uint32_t HELLO_UPDATE_MIN_INTERVAL_MS = 1000;
 
   // ── Frame counter persistence (batched NVS writes) ────────────────────
   // We persist frame_counter_ in batches: on boot we load the persisted value
@@ -260,9 +257,8 @@ class LoraMesh : public Component {
   // ── Callbacks ──────────────────────────────────────────────────────────
   // message_callback_ is likely always registered; use CallbackManager.
   CallbackManager<void(MeshMessage)> message_callback_;
-  // Route and gateway callbacks are often unused; save 4 bytes each.
+  // Route callbacks are often unused; save 4 bytes.
   LazyCallbackManager<void()> route_update_callback_;
-  LazyCallbackManager<void()> gateway_changed_callback_;
 
   // ── Diagnostic sensors ────────────────────────────────────────────────
 #ifdef USE_SENSOR
@@ -273,7 +269,7 @@ class LoraMesh : public Component {
 #endif
 #ifdef USE_TEXT_SENSOR
   text_sensor::TextSensor *routing_table_sensor_{nullptr};
-  text_sensor::TextSensor *best_gateway_sensor_{nullptr};
+  text_sensor::TextSensor *nearest_gateway_sensor_{nullptr};
 #endif
 };
 

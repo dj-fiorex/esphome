@@ -54,11 +54,11 @@ The single neighbour a node sends a unicast packet to on the way to a destinatio
 Automatic recovery of routing when a path breaks. Passive model: after roughly three missed HELLOs, a neighbour's direct Route expires, Routes that used it as Next Hop are invalidated, and alternatives are re-learned from other neighbours.
 
 **HELLO**:
-A periodic single-hop packet (never forwarded) carrying the sender's name, Gateway status, and a distance-vector digest of its known Routes. The sole mechanism by which Routes and Gateways are discovered. HELLO authentication is proposed in ADR-0009 but is not part of the current DATA-security contract.
+A periodic single-hop packet (never Forwarded) carrying the sender's name, Gateway status, and a distance-vector digest of its known Routes. Every HELLO has an eight-byte truncated HMAC-SHA256 tag under a domain-separated control-plane key and is verified before it changes mesh state. The sole mechanism by which Routes and Gateways are discovered.
 _Avoid_: beacon, advertisement (used loosely; HELLO is the concrete packet).
 
 **Route**:
-A routing-table entry: destination hash, next-hop hash, hop count, RSSI/SNR, gateway flag, expiry. Best route = fewest hops, ties broken by highest RSSI.
+A routing-table entry: destination hash, Next Hop hash, hop count, Path RSSI/SNR, Gateway flag, and expiry. Route choice uses fewest hops, strongest Path RSSI, then lowest unsigned destination Node ID.
 
 **Seen-cache**:
 A fixed ring buffer of `(src_id, frame_counter)` pairs used to suppress duplicate processing/forwarding of the same packet.

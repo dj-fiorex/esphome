@@ -7,8 +7,8 @@
 // AAD    (15 bytes): pkt_type(1) || flags(1) || src_id(4) || dst_id(4) || frame_counter(4) || payload_len(1)
 // Tag    (8 bytes):  CCM authentication tag appended after ciphertext
 //
-// On embedded targets this uses mbedtls (already linked by ESP-IDF / Arduino).
-// Host tests use a tiny reference AES-CCM built from first principles.
+// DATA uses mbedtls on embedded targets and a reference AES-CCM in host tests.
+// HELLO HMAC uses the same fixed-stack SHA-256 implementation on every target.
 
 #include <cstdint>
 #include <cstring>
@@ -20,6 +20,12 @@ static constexpr size_t FABRIC_KEY_SIZE = 16;
 
 /// DATA authentication tag size in bytes.
 static constexpr size_t DATA_AUTH_TAG_SIZE = 8;
+
+/// Domain-separated control-plane key and truncated HELLO tag sizes.
+static constexpr size_t CONTROL_PLANE_KEY_SIZE = 32;
+static constexpr size_t HELLO_AUTH_TAG_SIZE = 8;
+
+static constexpr uint8_t CONTROL_PLANE_KEY_DOMAIN[] = "LORA-MESH-CONTROL-v1";
 
 /// Nonce size for AES-128-CCM (13 bytes).
 static constexpr size_t CCM_NONCE_SIZE = 13;
@@ -76,6 +82,152 @@ inline uint32_t fabric_id_from_tag(const uint8_t tag[DATA_AUTH_TAG_SIZE]) {
   return static_cast<uint32_t>(tag[0]) | (static_cast<uint32_t>(tag[1]) << 8) | (static_cast<uint32_t>(tag[2]) << 16) |
          (static_cast<uint32_t>(tag[3]) << 24);
 }
+
+namespace detail {
+
+struct Sha256Context {
+  uint32_t state[8];
+  uint64_t bit_length;
+  uint8_t buffer[64];
+  size_t buffer_size;
+};
+
+inline uint32_t rotate_right(uint32_t value, uint8_t bits) { return (value >> bits) | (value << (32 - bits)); }
+
+inline void sha256_transform(Sha256Context &ctx, const uint8_t block[64]) {
+  static constexpr uint32_t K[64] = {
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  };
+  uint32_t words[64];
+  for (size_t i = 0; i < 16; i++) {
+    size_t offset = i * 4;
+    words[i] = (static_cast<uint32_t>(block[offset]) << 24) | (static_cast<uint32_t>(block[offset + 1]) << 16) |
+               (static_cast<uint32_t>(block[offset + 2]) << 8) | static_cast<uint32_t>(block[offset + 3]);
+  }
+  for (size_t i = 16; i < 64; i++) {
+    uint32_t s0 = rotate_right(words[i - 15], 7) ^ rotate_right(words[i - 15], 18) ^ (words[i - 15] >> 3);
+    uint32_t s1 = rotate_right(words[i - 2], 17) ^ rotate_right(words[i - 2], 19) ^ (words[i - 2] >> 10);
+    words[i] = words[i - 16] + s0 + words[i - 7] + s1;
+  }
+
+  uint32_t a = ctx.state[0];
+  uint32_t b = ctx.state[1];
+  uint32_t c = ctx.state[2];
+  uint32_t d = ctx.state[3];
+  uint32_t e = ctx.state[4];
+  uint32_t f = ctx.state[5];
+  uint32_t g = ctx.state[6];
+  uint32_t h = ctx.state[7];
+  for (size_t i = 0; i < 64; i++) {
+    uint32_t sum1 = rotate_right(e, 6) ^ rotate_right(e, 11) ^ rotate_right(e, 25);
+    uint32_t choose = (e & f) ^ (~e & g);
+    uint32_t temp1 = h + sum1 + choose + K[i] + words[i];
+    uint32_t sum0 = rotate_right(a, 2) ^ rotate_right(a, 13) ^ rotate_right(a, 22);
+    uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+    uint32_t temp2 = sum0 + majority;
+    h = g;
+    g = f;
+    f = e;
+    e = d + temp1;
+    d = c;
+    c = b;
+    b = a;
+    a = temp1 + temp2;
+  }
+  ctx.state[0] += a;
+  ctx.state[1] += b;
+  ctx.state[2] += c;
+  ctx.state[3] += d;
+  ctx.state[4] += e;
+  ctx.state[5] += f;
+  ctx.state[6] += g;
+  ctx.state[7] += h;
+}
+
+inline void sha256_init(Sha256Context &ctx) {
+  static constexpr uint32_t INITIAL_STATE[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                                                0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+  memcpy(ctx.state, INITIAL_STATE, sizeof(INITIAL_STATE));
+  ctx.bit_length = 0;
+  ctx.buffer_size = 0;
+}
+
+inline void sha256_update(Sha256Context &ctx, const uint8_t *data, size_t len) {
+  ctx.bit_length += static_cast<uint64_t>(len) * 8;
+  while (len > 0) {
+    size_t space = sizeof(ctx.buffer) - ctx.buffer_size;
+    size_t count = len < space ? len : space;
+    memcpy(ctx.buffer + ctx.buffer_size, data, count);
+    ctx.buffer_size += count;
+    data += count;
+    len -= count;
+    if (ctx.buffer_size == sizeof(ctx.buffer)) {
+      sha256_transform(ctx, ctx.buffer);
+      ctx.buffer_size = 0;
+    }
+  }
+}
+
+inline void sha256_final(Sha256Context &ctx, uint8_t digest[32]) {
+  ctx.buffer[ctx.buffer_size++] = 0x80;
+  if (ctx.buffer_size > 56) {
+    memset(ctx.buffer + ctx.buffer_size, 0, sizeof(ctx.buffer) - ctx.buffer_size);
+    sha256_transform(ctx, ctx.buffer);
+    ctx.buffer_size = 0;
+  }
+  memset(ctx.buffer + ctx.buffer_size, 0, 56 - ctx.buffer_size);
+  for (size_t i = 0; i < 8; i++) {
+    ctx.buffer[56 + i] = static_cast<uint8_t>(ctx.bit_length >> (56 - i * 8));
+  }
+  sha256_transform(ctx, ctx.buffer);
+  for (size_t i = 0; i < 8; i++) {
+    digest[i * 4] = static_cast<uint8_t>(ctx.state[i] >> 24);
+    digest[i * 4 + 1] = static_cast<uint8_t>(ctx.state[i] >> 16);
+    digest[i * 4 + 2] = static_cast<uint8_t>(ctx.state[i] >> 8);
+    digest[i * 4 + 3] = static_cast<uint8_t>(ctx.state[i]);
+  }
+}
+
+inline void hmac_sha256_digest(const uint8_t *key, size_t key_len, const uint8_t *data, size_t data_len,
+                               uint8_t digest[32]) {
+  uint8_t key_block[64]{};
+  if (key_len > sizeof(key_block)) {
+    Sha256Context key_ctx;
+    sha256_init(key_ctx);
+    sha256_update(key_ctx, key, key_len);
+    sha256_final(key_ctx, key_block);
+  } else {
+    memcpy(key_block, key, key_len);
+  }
+  uint8_t inner_pad[64];
+  uint8_t outer_pad[64];
+  for (size_t i = 0; i < sizeof(key_block); i++) {
+    inner_pad[i] = key_block[i] ^ 0x36;
+    outer_pad[i] = key_block[i] ^ 0x5c;
+  }
+
+  uint8_t inner_digest[32];
+  Sha256Context inner_ctx;
+  sha256_init(inner_ctx);
+  sha256_update(inner_ctx, inner_pad, sizeof(inner_pad));
+  sha256_update(inner_ctx, data, data_len);
+  sha256_final(inner_ctx, inner_digest);
+
+  Sha256Context outer_ctx;
+  sha256_init(outer_ctx);
+  sha256_update(outer_ctx, outer_pad, sizeof(outer_pad));
+  sha256_update(outer_ctx, inner_digest, sizeof(inner_digest));
+  sha256_final(outer_ctx, digest);
+}
+
+}  // namespace detail
 
 // ── Platform-specific AES-128-CCM implementation ─────────────────────────────
 
@@ -479,5 +631,29 @@ inline bool mesh_decrypt_payload(const uint8_t key[FABRIC_KEY_SIZE], uint32_t sr
 }
 
 #endif  // USE_HOST
+
+inline void derive_control_plane_key(const uint8_t fabric_key[FABRIC_KEY_SIZE],
+                                     uint8_t control_plane_key[CONTROL_PLANE_KEY_SIZE]) {
+  detail::hmac_sha256_digest(fabric_key, FABRIC_KEY_SIZE, CONTROL_PLANE_KEY_DOMAIN,
+                             sizeof(CONTROL_PLANE_KEY_DOMAIN) - 1, control_plane_key);
+}
+
+inline void compute_hello_auth_tag(const uint8_t control_plane_key[CONTROL_PLANE_KEY_SIZE], const uint8_t *packet,
+                                   size_t packet_len, uint8_t tag[HELLO_AUTH_TAG_SIZE]) {
+  uint8_t digest[32];
+  detail::hmac_sha256_digest(control_plane_key, CONTROL_PLANE_KEY_SIZE, packet, packet_len, digest);
+  memcpy(tag, digest, HELLO_AUTH_TAG_SIZE);
+}
+
+inline bool verify_hello_auth_tag(const uint8_t control_plane_key[CONTROL_PLANE_KEY_SIZE], const uint8_t *packet,
+                                  size_t packet_len, const uint8_t tag[HELLO_AUTH_TAG_SIZE]) {
+  uint8_t expected[HELLO_AUTH_TAG_SIZE];
+  compute_hello_auth_tag(control_plane_key, packet, packet_len, expected);
+  uint8_t difference = 0;
+  for (size_t i = 0; i < HELLO_AUTH_TAG_SIZE; i++) {
+    difference |= expected[i] ^ tag[i];
+  }
+  return difference == 0;
+}
 
 }  // namespace esphome::lora_mesh

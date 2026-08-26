@@ -1,11 +1,12 @@
-# Refresh a route's gateway flag on every confirmation, not just on path improvement
+---
+status: superseded
+superseded_by: 0007-propagate-gateway-status-in-route-advertisements
+---
 
-A node's gateway status is carried in the HELLO header (`FLAG_IS_GATEWAY`) and stored per-route as `RouteEntry::is_gateway`; `find_best_gateway_route_()` (and thus `has_gateway()` / `send_to_gateway()`) only considers routes whose flag is set. The flag is authoritative only for a **direct** neighbour — relayed route advertisements always carry `is_gw=false`, because gateway status is not propagated through the route digest.
+# Refresh Gateway status independently of path metrics
 
-`update_route_` wrote `is_gateway` only inside its path-update branch, which fires when the route is new, the hop count improves, the RSSI improves at equal hop count, or the next hop changes. For a steady direct neighbour (same next hop, same hop count, flat RSSI) that branch never fires, so the gateway flag froze at whatever value it held when the route was first created. A node first heard as a plain neighbour (`gw=no` at boot / before AUTO mode promoted it) — or first learned via a relayed advertisement — kept a stale `is_gateway=false` even as it re-advertised `gw=yes` on every subsequent HELLO. Field symptom: `send_to_gateway: no gateway in routing table` while the neighbour's HELLO clearly showed `gw=yes`.
+The original direct-neighbour implementation established that Gateway status is independent of Route quality and
+must refresh even when hop count, Next Hop, and RSSI do not improve. A status-only change is observable Route state.
 
-**Decision:** treat gateway status as independent of the path metric and refresh `is_gateway` from the latest advertisement on every confirmation, separate from the path-update branch. The flag change alone counts as a route change (fires `notify_route_changed_`).
-
-**Why this is safe against relayed advertisements clobbering a real gateway:** `process_hello_` only calls `update_route_` for an advertised route when it is strictly *better* (fewer hops) or a *re-confirmation from the same next hop*. Neither holds for an existing direct gateway neighbour (1 hop, next hop = the destination itself), so a relayed `is_gw=false` advertisement never reaches `update_route_` for that destination and cannot overwrite the flag to false. A genuinely multi-hop gateway is undiscoverable as a gateway anyway, since advertisements do not carry the flag — unchanged by this decision.
-
-**Consequence:** the gateway flag now tracks a neighbour becoming or ceasing to be a gateway within one HELLO interval instead of only when its path metric happens to improve. Builds on the equal-quality re-confirmation lease-renewal from [[0002-single-path-unicast-with-passive-healing]]; both stem from the same original defect of gating route-state updates on strict path improvement. Covered by host test `test_gateway_flag_refreshed_when_neighbor_becomes_gateway`. At the time of this decision, Gateway status was direct-neighbour-only; ADR-0007 later extends it across multi-hop Routes.
+ADR-0007 supersedes the direct-neighbour limitation: protocol-v4 Route advertisements now propagate Gateway status
+across multiple hops, use Path RSSI, and trigger coalesced Gateway availability or Gateway Withdrawal HELLO updates.

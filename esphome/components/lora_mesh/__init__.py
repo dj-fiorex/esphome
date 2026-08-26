@@ -8,7 +8,7 @@ from esphome.components import binary_sensor, sensor, text_sensor
 from esphome.components.sx126x import SX126x
 from esphome.components.sx127x import SX127x
 import esphome.config_validation as cv
-from esphome.const import CONF_GATEWAY, CONF_ID, CONF_ON_MESSAGE, CONF_PAYLOAD
+from esphome.const import CONF_ID, CONF_ON_MESSAGE, CONF_PAYLOAD
 from esphome.core import ID
 
 CODEOWNERS = ["@dj-fiorex"]
@@ -29,21 +29,19 @@ CONF_TX_JITTER = "tx_jitter"
 CONF_TX_QUEUE_SIZE = "tx_queue_size"
 CONF_LINK_SIM = "link_sim"
 CONF_DESTINATION = "destination"
+CONF_CONNECTED = "connected"
 
 CONF_ON_ROUTE_UPDATE = "on_route_update"
-CONF_ON_GATEWAY_CHANGED = "on_gateway_changed"
-
 CONF_NODE_COUNT_SENSOR_ID = "node_count_sensor_id"
 CONF_GATEWAY_AVAILABLE_SENSOR_ID = "gateway_available_sensor_id"
 CONF_ROUTING_TABLE_SENSOR_ID = "routing_table_sensor_id"
-CONF_BEST_GATEWAY_SENSOR_ID = "best_gateway_sensor_id"
+CONF_NEAREST_GATEWAY_SENSOR_ID = "nearest_gateway_sensor_id"
 
 # ── C++ types ──────────────────────────────────────────────────────────────────
 lora_mesh_ns = cg.esphome_ns.namespace("lora_mesh")
 
 LoraMesh = lora_mesh_ns.class_("LoraMesh", cg.Component)
 LoRaRadio = lora_mesh_ns.class_("LoRaRadio")
-GatewayMode = lora_mesh_ns.enum("GatewayMode", is_class=True)
 MeshMessage = lora_mesh_ns.class_("MeshMessage")
 
 # Radio adapter C++ types (conditionally used based on radio_id type)
@@ -60,12 +58,9 @@ BroadcastMessageAction = lora_mesh_ns.class_(
 SendToGatewayAction = lora_mesh_ns.class_(
     "SendToGatewayAction", automation.Action, cg.Parented.template(LoraMesh)
 )
-
-GATEWAY_MODES = {
-    "normal": GatewayMode.NORMAL,
-    "gateway": GatewayMode.GATEWAY,
-    "auto": GatewayMode.AUTO,
-}
+SetUpstreamConnectedAction = lora_mesh_ns.class_(
+    "SetUpstreamConnectedAction", automation.Action, cg.Parented.template(LoraMesh)
+)
 
 
 def _validate_fabric_key(value):
@@ -90,10 +85,6 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_NODE_ID): cv.templatable(cv.string),
             cv.Required(CONF_FABRIC_KEY): cv.sensitive(
                 cv.All(cv.string, _validate_fabric_key)
-            ),
-            # Gateway behaviour
-            cv.Optional(CONF_GATEWAY, default="normal"): cv.enum(
-                GATEWAY_MODES, lower=True
             ),
             # Routing parameters
             cv.Optional(CONF_MAX_HOPS, default=8): cv.int_range(min=1, max=255),
@@ -123,7 +114,6 @@ CONFIG_SCHEMA = cv.All(
             # Automation triggers
             cv.Optional(CONF_ON_MESSAGE): automation.validate_automation({}),
             cv.Optional(CONF_ON_ROUTE_UPDATE): automation.validate_automation({}),
-            cv.Optional(CONF_ON_GATEWAY_CHANGED): automation.validate_automation({}),
             # Optional diagnostic sensors (user must declare these separately)
             cv.Optional(CONF_NODE_COUNT_SENSOR_ID): cv.use_id(sensor.Sensor),
             cv.Optional(CONF_GATEWAY_AVAILABLE_SENSOR_ID): cv.use_id(
@@ -132,7 +122,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_ROUTING_TABLE_SENSOR_ID): cv.use_id(
                 text_sensor.TextSensor
             ),
-            cv.Optional(CONF_BEST_GATEWAY_SENSOR_ID): cv.use_id(text_sensor.TextSensor),
+            cv.Optional(CONF_NEAREST_GATEWAY_SENSOR_ID): cv.use_id(
+                text_sensor.TextSensor
+            ),
         }
     ).extend(cv.COMPONENT_SCHEMA)
 )
@@ -189,7 +181,6 @@ async def to_code(config) -> None:
     if CONF_NODE_ID in config:
         node_id_templ = await cg.templatable(config[CONF_NODE_ID], [], cg.std_string)
         cg.add(var.set_node_id(node_id_templ))
-    cg.add(var.set_gateway_mode(config[CONF_GATEWAY]))
     cg.add(var.set_max_hops(config[CONF_MAX_HOPS]))
     cg.add(
         var.set_discovery_interval(
@@ -219,15 +210,6 @@ async def to_code(config) -> None:
             conf,
         )
 
-    # ── on_gateway_changed trigger ────────────────────────────────────────
-    for conf in config.get(CONF_ON_GATEWAY_CHANGED, []):
-        await automation.build_callback_automation(
-            var,
-            "add_on_gateway_changed_callback",
-            [],
-            conf,
-        )
-
     # ── Optional diagnostic sensors ───────────────────────────────────────
     if CONF_NODE_COUNT_SENSOR_ID in config:
         sens = await cg.get_variable(config[CONF_NODE_COUNT_SENSOR_ID])
@@ -241,9 +223,9 @@ async def to_code(config) -> None:
         ts = await cg.get_variable(config[CONF_ROUTING_TABLE_SENSOR_ID])
         cg.add(var.set_routing_table_sensor(ts))
 
-    if CONF_BEST_GATEWAY_SENSOR_ID in config:
-        ts = await cg.get_variable(config[CONF_BEST_GATEWAY_SENSOR_ID])
-        cg.add(var.set_best_gateway_sensor(ts))
+    if CONF_NEAREST_GATEWAY_SENSOR_ID in config:
+        ts = await cg.get_variable(config[CONF_NEAREST_GATEWAY_SENSOR_ID])
+        cg.add(var.set_nearest_gateway_sensor(ts))
 
 
 # ── Action schemas and registrations ─────────────────────────────────────────
@@ -305,4 +287,26 @@ async def send_to_gateway_action_to_code(config, action_id, template_arg, args):
     await cg.register_parented(var, config[CONF_ID])
     templ = await cg.templatable(config[CONF_PAYLOAD], args, cg.std_string)
     cg.add(var.set_payload(templ))
+    return var
+
+
+SET_UPSTREAM_CONNECTED_ACTION_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.use_id(LoraMesh),
+        cv.Required(CONF_CONNECTED): cv.templatable(cv.boolean),
+    }
+)
+
+
+@automation.register_action(
+    "lora_mesh.set_upstream_connected",
+    SetUpstreamConnectedAction,
+    SET_UPSTREAM_CONNECTED_ACTION_SCHEMA,
+    synchronous=True,
+)
+async def set_upstream_connected_action_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    connected = await cg.templatable(config[CONF_CONNECTED], args, cg.bool_)
+    cg.add(var.set_connected(connected))
     return var

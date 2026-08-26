@@ -87,19 +87,22 @@ static constexpr uint8_t FLAG_IS_FORWARD = 0x08;  // This is a forwarded packet
 //   [1]                   name_len       (1 byte)  — byte length of node_name, 0 if absent
 //   [2 .. 2+name_len-1]   node_name      (name_len bytes, NOT NUL-terminated on wire)
 //   [2+name_len]          route_count    (1 byte)  — number of RouteAdvertisement entries
-//   [3+name_len ..]       route entries  (6 bytes each)
+//   [3+name_len ..]       route entries  (7 bytes each)
+//   [end-8 .. end-1]      auth_tag       (8 bytes) — truncated HMAC-SHA256 over header and body
 //
 // RouteAdvertisement (per entry):
 //   [0..3]  dest_id      (uint32_t LE)
 //   [4]     hop_count    (uint8_t)
 //   [5]     rssi_scaled  (int8_t)  — RSSI dBm clamped to [-128, 127]
+//   [6]     route_flags  (uint8_t) — bit 0: destination has Upstream Connectivity
 //
 // HELLO_FIXED_SIZE is the minimum number of HELLO-body bytes required to read
 // proto_version and name_len (the two bytes needed before any further parsing).
 // ───────────────────────────────────────────────────────────────────────────
 
 static constexpr size_t HELLO_FIXED_SIZE = 2;
-static constexpr size_t ROUTE_ADV_SIZE = 6;
+static constexpr size_t ROUTE_ADV_SIZE = 7;
+static constexpr uint8_t ROUTE_FLAG_IS_GATEWAY = 0x01;
 
 // ───────────────────────────────────────────────────────────────────────────
 // DATA payload (after the 28-byte header)
@@ -165,16 +168,6 @@ struct MeshMessage {
   float snr{0.0f};
   bool is_broadcast{false};
   bool is_for_this_node{false};
-};
-
-// ───────────────────────────────────────────────────────────────────────────
-// Gateway mode (set via YAML `gateway:` option)
-// ───────────────────────────────────────────────────────────────────────────
-
-enum class GatewayMode : uint8_t {
-  NORMAL = 0,   // Never acts as gateway
-  GATEWAY = 1,  // Always acts as gateway
-  AUTO = 2,     // Gateway when Wi-Fi/internet is available
 };
 
 // ───────────────────────────────────────────────────────────────────────────

@@ -57,4 +57,12 @@ template<typename... Ts> class SendToGatewayAction : public Action<Ts...>, publi
   void play(const Ts &...x) override { this->parent_->send_to_gateway(this->payload_.value(x...)); }
 };
 
+/** Set the application-owned Upstream Connectivity state. */
+template<typename... Ts> class SetUpstreamConnectedAction : public Action<Ts...>, public Parented<LoraMesh> {
+ public:
+  TEMPLATABLE_VALUE(bool, connected)
+
+  void play(const Ts &...x) override { this->parent_->set_upstream_connected(this->connected_.value(x...)); }
+};
+
 }  // namespace esphome::lora_mesh

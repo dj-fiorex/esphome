@@ -101,11 +101,17 @@ static void test_own_hello_has_v4_body_at_offset_28() {
   EXPECT_EQ(pkt[4], PKT_HELLO);
   EXPECT_EQ(get_u32_le(&pkt[10]), BROADCAST);  // dst
   EXPECT_EQ(get_u32_le(&pkt[24]), BROADCAST);  // next_hop
-  EXPECT_TRUE(pkt.size() >= HDR + 3);
+  EXPECT_TRUE(pkt.size() >= HDR + 3 + HELLO_TAG_SIZE);
   EXPECT_EQ(pkt[HDR], 4);      // proto_version
   EXPECT_EQ(pkt[HDR + 1], 6);  // name_len
   EXPECT_TRUE(std::string(pkt.begin() + HDR + 2, pkt.begin() + HDR + 8) == "node-a");
   EXPECT_EQ(pkt[HDR + 8], 0);  // route_count (no routes yet)
+
+  std::vector<uint8_t> authenticated_bytes(pkt.begin(), pkt.end() - HELLO_TAG_SIZE);
+  auto expected_tag = hello_auth_tag(authenticated_bytes);
+  EXPECT_TRUE(std::equal(expected_tag.begin(), expected_tag.end(), pkt.end() - HELLO_TAG_SIZE));
+  static const uint8_t EXPECTED_TAG[HELLO_TAG_SIZE] = {0xec, 0x1f, 0xe0, 0x89, 0x25, 0x55, 0xeb, 0xe6};
+  EXPECT_TRUE(std::equal(EXPECTED_TAG, EXPECTED_TAG + HELLO_TAG_SIZE, pkt.end() - HELLO_TAG_SIZE));
 }
 
 static void test_hello_builds_direct_and_advertised_routes() {
@@ -122,12 +128,124 @@ static void test_hello_builds_direct_and_advertised_routes() {
 static void test_protocol_v3_hello_is_rejected_without_route_state() {
   TestNode a("node-a");
   auto packet = make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 1, -70}});
+  packet.resize(packet.size() - HELLO_TAG_SIZE);
   packet[HDR] = 3;
+  auto tag = hello_auth_tag(packet);
+  packet.insert(packet.end(), tag.begin(), tag.end());
 
   a.receive(packet);
 
   EXPECT_FALSE(a.mesh.has_route("node-b"));
   EXPECT_FALSE(a.mesh.has_route("node-c"));
+}
+
+static void test_forged_hello_does_not_poison_seen_cache_or_discovery_state() {
+  TestNode a("node-a");
+  int route_updates = 0;
+  a.mesh.add_on_route_update_callback([&route_updates]() { ++route_updates; });
+  auto forged = make_hello(FABRIC, NODE_B, "forged-name", {}, FLAG_GATEWAY, 41);
+  forged.back() ^= 0x01;
+
+  a.receive(forged);
+
+  EXPECT_FALSE(a.mesh.has_route("node-b"));
+  EXPECT_FALSE(a.mesh.has_gateway());
+  EXPECT_TRUE(a.mesh.get_node_name(NODE_B) == nullptr);
+  EXPECT_EQ(a.mesh.get_known_node_count(), 0u);
+  EXPECT_EQ(route_updates, 0);
+
+  // The authentic packet with the same source/counter must still be accepted,
+  // proving the forged packet did not enter the Seen-cache.
+  a.receive(make_hello(FABRIC, NODE_B, "node-b", {}, FLAG_GATEWAY, 41));
+  EXPECT_TRUE(a.mesh.has_route("node-b"));
+  EXPECT_TRUE(a.mesh.has_gateway());
+  EXPECT_TRUE(std::string(a.mesh.get_node_name(NODE_B)) == "node-b");
+}
+
+static void test_wrong_key_hello_cannot_create_gateway_or_route() {
+  static const uint8_t WRONG_KEY[FABRIC_KEY_SIZE] = {0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8,
+                                                     0xF7, 0xF6, 0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0};
+  TestNode a("node-a");
+
+  a.receive(make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 1, -70}}, FLAG_GATEWAY, 42, WRONG_KEY));
+
+  EXPECT_FALSE(a.mesh.has_route("node-b"));
+  EXPECT_FALSE(a.mesh.has_route("node-c"));
+  EXPECT_FALSE(a.mesh.has_gateway());
+  EXPECT_TRUE(a.mesh.get_node_name(NODE_B) == nullptr);
+}
+
+static void test_changed_authenticated_hello_byte_cannot_change_state() {
+  TestNode a("node-a");
+  auto changed_header = make_hello(FABRIC, NODE_B, "node-b", {}, FLAG_GATEWAY, 43);
+  changed_header[18] ^= 0x01;  // TTL is visible routing metadata, but authenticated.
+  a.receive(changed_header);
+
+  auto changed_body = make_hello(FABRIC, NODE_C, "node-c", {}, FLAG_GATEWAY, 44);
+  changed_body[HDR + 2] ^= 0x01;  // First Node-name byte.
+  a.receive(changed_body);
+
+  EXPECT_EQ(a.mesh.get_known_node_count(), 0u);
+  EXPECT_FALSE(a.mesh.has_gateway());
+  EXPECT_TRUE(a.mesh.get_node_name(NODE_B) == nullptr);
+  EXPECT_TRUE(a.mesh.get_node_name(NODE_C) == nullptr);
+}
+
+static void test_changed_hello_packet_type_cannot_poison_seen_cache() {
+  TestNode a("node-a");
+
+  auto changed_to_data = make_hello(FABRIC, NODE_B, "node-b", {}, FLAG_GATEWAY, 45);
+  changed_to_data[4] = PKT_DATA;
+  a.receive(changed_to_data);
+  a.receive(make_hello(FABRIC, NODE_B, "node-b", {}, FLAG_GATEWAY, 45));
+  EXPECT_TRUE(a.mesh.has_route("node-b"));
+
+  auto changed_to_reserved = make_hello(FABRIC, NODE_C, "node-c", {}, FLAG_GATEWAY, 46);
+  changed_to_reserved[4] = 6;  // Reserved ERROR type.
+  a.receive(changed_to_reserved);
+  a.receive(make_hello(FABRIC, NODE_C, "node-c", {}, FLAG_GATEWAY, 46));
+  EXPECT_TRUE(a.mesh.has_route("node-c"));
+}
+
+static void test_malformed_hello_cannot_change_state() {
+  TestNode a("node-a");
+  auto truncated = make_hello(FABRIC, NODE_B, "node-b", {}, FLAG_GATEWAY, 45);
+  truncated.pop_back();
+  a.receive(truncated);
+
+  auto trailing = make_hello(FABRIC, NODE_C, "node-c", {}, FLAG_GATEWAY, 46);
+  trailing.push_back(0x00);
+  a.receive(trailing);
+
+  EXPECT_EQ(a.mesh.get_known_node_count(), 0u);
+  EXPECT_FALSE(a.mesh.has_gateway());
+}
+
+static void test_authenticated_hello_with_invalid_header_cannot_change_state() {
+  TestNode a("node-a");
+
+  auto wrong_destination = make_hello(FABRIC, NODE_B, "node-b", {}, FLAG_GATEWAY, 47);
+  put_u32_le(&wrong_destination[10], NODE_A);
+  resign_hello(wrong_destination);
+  a.receive(wrong_destination);
+
+  auto forwarded = make_hello(FABRIC, NODE_C, "node-c", {}, FLAG_GATEWAY, 48);
+  forwarded[19] = 1;
+  resign_hello(forwarded);
+  a.receive(forwarded);
+
+  EXPECT_EQ(a.mesh.get_known_node_count(), 0u);
+  EXPECT_FALSE(a.mesh.has_gateway());
+}
+
+static void test_authenticated_hello_with_invalid_route_cannot_change_state() {
+  TestNode a("node-a");
+  auto invalid_route = make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 255, -70, true}}, FLAG_GATEWAY, 49);
+
+  a.receive(invalid_route);
+
+  EXPECT_EQ(a.mesh.get_known_node_count(), 0u);
+  EXPECT_FALSE(a.mesh.has_gateway());
 }
 
 static void test_fabric_mismatch_drops_packet() {
@@ -379,7 +497,7 @@ static void test_gateway_flag_refreshed_when_neighbor_becomes_gateway() {
   EXPECT_TRUE(a.mesh.has_gateway());  // pre-fix: stale is_gateway=false hid the gateway
   char gw_hex[9];
   snprintf(gw_hex, sizeof(gw_hex), "%08X", NODE_B);
-  EXPECT_TRUE(a.mesh.get_best_gateway() == gw_hex);
+  EXPECT_TRUE(a.mesh.get_nearest_gateway() == gw_hex);
 
   // And a node sending to the gateway now finds the route and queues a packet.
   a.radio.sent.clear();
@@ -387,6 +505,128 @@ static void test_gateway_flag_refreshed_when_neighbor_becomes_gateway() {
   a.mesh.loop();
   EXPECT_EQ(a.radio.sent.size(), 1u);
   EXPECT_EQ(get_u32_le(&a.radio.sent[0][24]), NODE_B);  // next_hop = gateway B
+}
+
+static void test_upstream_connectivity_starts_false_and_only_real_transitions_schedule_hello() {
+  TestNode a("node-a");
+
+  EXPECT_FALSE(a.mesh.is_upstream_connected());
+
+  // Repeating the boot state is a no-op.
+  a.mesh.set_upstream_connected(false);
+  advance_and_loop(a, 1000);
+  EXPECT_EQ(a.radio.sent.size(), 0u);
+
+  // A real transition is advertised promptly through HELLO.
+  a.mesh.set_upstream_connected(true);
+  advance_and_loop(a, 1000);
+  EXPECT_TRUE(a.mesh.is_upstream_connected());
+  EXPECT_EQ(a.radio.sent.size(), 1u);
+  EXPECT_EQ(a.radio.sent[0][4], PKT_HELLO);
+  EXPECT_TRUE(a.radio.sent[0][5] & FLAG_GATEWAY);
+
+  // Repeating the current state must not create redundant transition traffic.
+  a.radio.sent.clear();
+  a.mesh.set_upstream_connected(true);
+  advance_and_loop(a, 1000);
+  EXPECT_EQ(a.radio.sent.size(), 0u);
+
+  a.mesh.set_upstream_connected(false);
+  advance_and_loop(a, 1000);
+  EXPECT_FALSE(a.mesh.is_upstream_connected());
+  EXPECT_EQ(a.radio.sent.size(), 1u);
+  EXPECT_FALSE(a.radio.sent[0][5] & FLAG_GATEWAY);
+}
+
+static void test_route_advertisement_propagates_gateway_and_weakest_path_rssi() {
+  TestNode a("node-a");
+
+  // B advertises a Gateway C path measured at -70 dBm; A's B link is weaker
+  // at -90 dBm, so the propagated Path RSSI must be the weakest link (-90).
+  a.receive(make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 1, -70, true}}, 0, 50), -90.0f);
+
+  EXPECT_TRUE(a.mesh.has_gateway());
+  char gateway_hex[9];
+  snprintf(gateway_hex, sizeof(gateway_hex), "%08X", NODE_C);
+  EXPECT_TRUE(a.mesh.get_nearest_gateway() == gateway_hex);
+  std::string routes = a.mesh.get_routing_table_json();
+  EXPECT_TRUE(routes.find("\"gw\":true") != std::string::npos);
+  EXPECT_TRUE(routes.find("\"rssi\":-90") != std::string::npos);
+
+  a.radio.sent.clear();
+  EXPECT_TRUE(a.mesh.send_to_gateway("status"));
+  a.mesh.loop();
+  EXPECT_EQ(get_u32_le(&a.radio.sent[0][10]), NODE_C);
+  EXPECT_EQ(get_u32_le(&a.radio.sent[0][24]), NODE_B);
+}
+
+static void test_nearest_gateway_selection_is_deterministic() {
+  TestNode a("node-a");
+
+  // Fewer hops beats stronger Path RSSI.
+  a.receive(make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 2, -40, true}}, 0, 51), -40.0f);
+  a.receive(make_hello(FABRIC, NODE_D, "node-d", {}, FLAG_GATEWAY, 52), -100.0f);
+  char node_d_hex[9];
+  snprintf(node_d_hex, sizeof(node_d_hex), "%08X", NODE_D);
+  EXPECT_TRUE(a.mesh.get_nearest_gateway() == node_d_hex);
+
+  // At equal hops, stronger weakest-link Path RSSI wins.
+  a.mesh.clear_routes();
+  a.receive(make_hello(FABRIC, NODE_C, "node-c", {}, FLAG_GATEWAY, 53), -80.0f);
+  a.receive(make_hello(FABRIC, NODE_D, "node-d", {}, FLAG_GATEWAY, 54), -90.0f);
+  char node_c_hex[9];
+  snprintf(node_c_hex, sizeof(node_c_hex), "%08X", NODE_C);
+  EXPECT_TRUE(a.mesh.get_nearest_gateway() == node_c_hex);
+
+  // Exact metric ties use the lowest unsigned Node ID, regardless of learning order.
+  TestNode first("node-a"), second("node-a");
+  first.receive(make_hello(FABRIC, NODE_B, "node-b", {}, FLAG_GATEWAY, 55), -70.0f);
+  first.receive(make_hello(FABRIC, NODE_C, "node-c", {}, FLAG_GATEWAY, 56), -70.0f);
+  second.receive(make_hello(FABRIC, NODE_C, "node-c", {}, FLAG_GATEWAY, 56), -70.0f);
+  second.receive(make_hello(FABRIC, NODE_B, "node-b", {}, FLAG_GATEWAY, 55), -70.0f);
+  uint32_t lowest_id = std::min(NODE_B, NODE_C);
+  char lowest_hex[9];
+  snprintf(lowest_hex, sizeof(lowest_hex), "%08X", lowest_id);
+  EXPECT_TRUE(first.mesh.get_nearest_gateway() == lowest_hex);
+  EXPECT_TRUE(second.mesh.get_nearest_gateway() == lowest_hex);
+}
+
+static void test_three_node_gateway_discovery_and_delivery() {
+  TestNode a("node-a"), b("node-b"), c("node-c");
+
+  c.mesh.set_upstream_connected(true);
+  advance_and_loop(c, 1000);
+  EXPECT_EQ(c.radio.sent.size(), 1u);
+  b.receive(c.radio.sent[0], -70.0f);
+
+  // B promptly propagates C's Gateway availability in its next coalesced HELLO.
+  advance_and_loop(b, 1000);
+  EXPECT_EQ(b.radio.sent.size(), 1u);
+  a.receive(b.radio.sent[0], -80.0f);
+  EXPECT_TRUE(a.mesh.has_gateway());
+  a.mesh.loop();  // consume A's own propagated HELLO before application DATA
+
+  a.radio.sent.clear();
+  b.radio.sent.clear();
+  EXPECT_TRUE(a.mesh.send_to_gateway("soil=17"));
+  a.mesh.loop();
+  b.receive(a.radio.sent[0]);
+  b.mesh.loop();
+  c.receive(b.radio.sent[0]);
+  EXPECT_EQ(c.received.size(), 1u);
+  EXPECT_TRUE(c.received[0].payload == "soil=17");
+}
+
+static void test_gateway_transition_hello_updates_are_coalesced() {
+  TestNode a("node-a");
+
+  for (int i = 0; i < 20; i++) {
+    a.mesh.set_upstream_connected((i % 2) == 0);
+  }
+  advance_and_loop(a, 1000);
+
+  EXPECT_EQ(a.radio.sent.size(), 1u);
+  EXPECT_FALSE(a.radio.sent[0][5] & FLAG_GATEWAY);  // final state wins
 }
 
 // ── Slice 8: bounded TX queue with randomized jitter (issue #12) ────────────
@@ -613,6 +853,13 @@ int main() {
   RUN_TEST(test_own_hello_has_v4_body_at_offset_28);
   RUN_TEST(test_hello_builds_direct_and_advertised_routes);
   RUN_TEST(test_protocol_v3_hello_is_rejected_without_route_state);
+  RUN_TEST(test_forged_hello_does_not_poison_seen_cache_or_discovery_state);
+  RUN_TEST(test_wrong_key_hello_cannot_create_gateway_or_route);
+  RUN_TEST(test_changed_authenticated_hello_byte_cannot_change_state);
+  RUN_TEST(test_changed_hello_packet_type_cannot_poison_seen_cache);
+  RUN_TEST(test_malformed_hello_cannot_change_state);
+  RUN_TEST(test_authenticated_hello_with_invalid_header_cannot_change_state);
+  RUN_TEST(test_authenticated_hello_with_invalid_route_cannot_change_state);
   RUN_TEST(test_fabric_mismatch_drops_packet);
   RUN_TEST(test_unicast_send_sets_next_hop_from_routing_table);
   RUN_TEST(test_unicast_delivered_to_destination);
@@ -625,6 +872,11 @@ int main() {
   RUN_TEST(test_better_path_still_replaces_worse_route);
   RUN_TEST(test_dead_next_hop_invalidates_dependent_routes);
   RUN_TEST(test_gateway_flag_refreshed_when_neighbor_becomes_gateway);
+  RUN_TEST(test_upstream_connectivity_starts_false_and_only_real_transitions_schedule_hello);
+  RUN_TEST(test_route_advertisement_propagates_gateway_and_weakest_path_rssi);
+  RUN_TEST(test_nearest_gateway_selection_is_deterministic);
+  RUN_TEST(test_three_node_gateway_discovery_and_delivery);
+  RUN_TEST(test_gateway_transition_hello_updates_are_coalesced);
   RUN_TEST(test_app_send_is_queued_not_transmitted_inline);
   RUN_TEST(test_at_most_one_transmit_per_loop);
   RUN_TEST(test_forwarding_is_queued_not_inline);

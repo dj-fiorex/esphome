@@ -45,3 +45,21 @@ def test_removed_security_options_are_rejected(removed_key: str) -> None:
 
 def test_runtime_group_key_action_is_removed() -> None:
     assert "lora_mesh.set_group_key" not in automation.ACTION_REGISTRY
+
+
+@pytest.mark.parametrize(
+    "removed_key", ("gateway", "on_gateway_changed", "best_gateway_sensor_id")
+)
+def test_removed_gateway_configuration_is_rejected(removed_key: str) -> None:
+    with pytest.raises(cv.Invalid, match="extra keys not allowed"):
+        _validate_lora_mesh_config(**{removed_key: "gateway"})
+
+
+def test_upstream_connectivity_action_replaces_gateway_modes() -> None:
+    assert "lora_mesh.set_upstream_connected" in automation.ACTION_REGISTRY
+
+
+def test_nearest_gateway_diagnostic_uses_canonical_name() -> None:
+    config = _validate_lora_mesh_config(nearest_gateway_sensor_id="nearest_gateway")
+
+    assert config["nearest_gateway_sensor_id"].id == "nearest_gateway"

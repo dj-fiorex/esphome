@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -117,6 +118,16 @@ constexpr uint8_t PKT_HELLO = 1;
 constexpr uint8_t PKT_DATA = 2;
 constexpr uint8_t FLAG_GATEWAY = 0x01;
 constexpr uint8_t FLAG_BROADCAST = 0x02;
+constexpr size_t HELLO_TAG_SIZE = 8;
+
+inline std::vector<uint8_t> hello_auth_tag(const std::vector<uint8_t> &packet_without_tag,
+                                           const uint8_t *fabric_key = TEST_FABRIC_KEY) {
+  uint8_t control_key[esphome::lora_mesh::CONTROL_PLANE_KEY_SIZE];
+  uint8_t tag[HELLO_TAG_SIZE];
+  esphome::lora_mesh::derive_control_plane_key(fabric_key, control_key);
+  esphome::lora_mesh::compute_hello_auth_tag(control_key, packet_without_tag.data(), packet_without_tag.size(), tag);
+  return std::vector<uint8_t>(tag, tag + HELLO_TAG_SIZE);
+}
 
 inline std::vector<uint8_t> make_header(uint32_t fabric_id, uint8_t pkt_type, uint8_t flags, uint32_t src_id,
                                         uint32_t dst_id, uint32_t frame_counter, uint8_t ttl, uint8_t hop_count,
@@ -139,25 +150,35 @@ struct RouteAdv {
   uint32_t dest_id;
   uint8_t hop_count;
   int8_t rssi;
+  bool is_gateway{false};
 };
 
 /// Single-hop HELLO from `src` (spec §5): protocol-v4 body at offset 28.
 inline std::vector<uint8_t> make_hello(uint32_t fabric_id, uint32_t src_id, const std::string &name,
                                        const std::vector<RouteAdv> &routes = {}, uint8_t flags = 0,
-                                       uint32_t frame_counter = 1) {
+                                       uint32_t frame_counter = 1, const uint8_t *fabric_key = TEST_FABRIC_KEY) {
   auto pkt = make_header(fabric_id, PKT_HELLO, flags, src_id, BROADCAST, frame_counter, 8, 0, src_id, BROADCAST);
   pkt.push_back(4);  // proto_version
   pkt.push_back(static_cast<uint8_t>(name.size()));
   pkt.insert(pkt.end(), name.begin(), name.end());
   pkt.push_back(static_cast<uint8_t>(routes.size()));
   for (const auto &r : routes) {
-    uint8_t entry[6];
+    uint8_t entry[7];
     put_u32_le(entry, r.dest_id);
     entry[4] = r.hop_count;
     entry[5] = static_cast<uint8_t>(r.rssi);
-    pkt.insert(pkt.end(), entry, entry + 6);
+    entry[6] = r.is_gateway ? FLAG_GATEWAY : 0;
+    pkt.insert(pkt.end(), entry, entry + 7);
   }
+  auto tag = hello_auth_tag(pkt, fabric_key);
+  pkt.insert(pkt.end(), tag.begin(), tag.end());
   return pkt;
+}
+
+inline void resign_hello(std::vector<uint8_t> &pkt, const uint8_t *fabric_key = TEST_FABRIC_KEY) {
+  pkt.resize(pkt.size() - HELLO_TAG_SIZE);
+  auto tag = hello_auth_tag(pkt, fabric_key);
+  pkt.insert(pkt.end(), tag.begin(), tag.end());
 }
 
 /// Encrypted DATA packet (spec §4): payload encrypted with the Fabric Key and an eight-byte tag.
