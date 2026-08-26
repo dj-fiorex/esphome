@@ -54,7 +54,7 @@ The single neighbour a node sends a unicast packet to on the way to a destinatio
 Automatic recovery of routing when a path breaks. Passive model: after roughly three missed HELLOs, a neighbour's direct Route expires, Routes that used it as Next Hop are invalidated, and alternatives are re-learned from other neighbours.
 
 **HELLO**:
-A periodic, authenticated single-hop packet (never forwarded) carrying the sender's name, Gateway status, and a distance-vector digest of its known Routes. The sole mechanism by which Routes and Gateways are discovered.
+A periodic single-hop packet (never forwarded) carrying the sender's name, Gateway status, and a distance-vector digest of its known Routes. The sole mechanism by which Routes and Gateways are discovered. HELLO authentication is proposed in ADR-0009 but is not part of the current DATA-security contract.
 _Avoid_: beacon, advertisement (used loosely; HELLO is the concrete packet).
 
 **Route**:
