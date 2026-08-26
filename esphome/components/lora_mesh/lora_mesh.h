@@ -191,15 +191,19 @@ class LoraMesh : public Component {
   void update_replay_counter_(uint32_t src_id, uint32_t frame_counter);
 
  private:
+  // The Fabric identity is invariant-coupled: the ID must only ever be the
+  // domain-separated derivation of this immutable, validated key.
+  uint32_t fabric_id_{0};
+  std::array<uint8_t, FABRIC_KEY_SIZE> fabric_key_{};
+  bool fabric_key_valid_{false};
+
+ protected:
   // ── State ──────────────────────────────────────────────────────────────
   LoRaRadio *radio_{nullptr};
   uint32_t node_id_{0};
-  uint32_t fabric_id_{0};
   std::string node_id_str_;
   TemplatableValue<std::string> node_id_template_;
   bool has_node_id_{false};
-  std::array<uint8_t, FABRIC_KEY_SIZE> fabric_key_{};
-  bool fabric_key_valid_{false};
   GatewayMode gateway_mode_{GatewayMode::NORMAL};
   bool acting_as_gateway_{false};
   bool last_gateway_available_{false};
