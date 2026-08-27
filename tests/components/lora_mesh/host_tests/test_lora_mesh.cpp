@@ -11,6 +11,7 @@ static const uint32_t NODE_A = fnv1a_str("node-a");
 static const uint32_t NODE_B = fnv1a_str("node-b");
 static const uint32_t NODE_C = fnv1a_str("node-c");
 static const uint32_t NODE_D = fnv1a_str("node-d");
+static const uint32_t NODE_E = fnv1a_str("node-e");
 
 // AES-128-CCM(TEST_FABRIC_KEY, nonce="LORA-FABRICID", empty plaintext,
 // AAD="LORA-MESH-ID-v1", tag=8) starts with 62 36 ff de. The public Fabric ID
@@ -190,6 +191,47 @@ static void test_hello_builds_direct_and_advertised_routes() {
   EXPECT_TRUE(a.mesh.has_route("node-b"));
   EXPECT_TRUE(a.mesh.has_route("node-c"));
   EXPECT_FALSE(a.mesh.has_route("node-x"));
+}
+
+static void test_maximum_valid_route_is_advertised_without_poisoning_hello() {
+  TestNode advertising_node("node-a");
+  advertising_node.mesh.set_max_hops(UINT8_MAX);
+
+  // A valid 253-hop advertisement extends to the maximum wire-valid Route
+  // length. A 254-hop advertisement would extend to 255 and must not enter
+  // the routing table even when a caller bypasses the Python schema.
+  advertising_node.receive(make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 253, -70}, {NODE_E, 254, -80}}, 0, 50));
+  advance_and_loop(advertising_node, 30000);
+
+  EXPECT_EQ(advertising_node.radio.sent.size(), 1u);
+  bool advertised_maximum_route = false;
+  bool advertised_invalid_route = false;
+  for (size_t index = 0; index < hello_route_count(advertising_node.radio.sent[0]); ++index) {
+    RouteAdv route = hello_route_at(advertising_node.radio.sent[0], index);
+    advertised_maximum_route |= route.dest_id == NODE_C && route.hop_count == 254;
+    advertised_invalid_route |= route.hop_count == UINT8_MAX;
+  }
+  EXPECT_TRUE(advertised_maximum_route);
+  EXPECT_FALSE(advertised_invalid_route);
+
+  // The maximum valid advertisement must not make a receiving Node reject the entire
+  // authenticated HELLO as malformed.
+  TestNode receiving_node("node-d");
+  receiving_node.receive(advertising_node.radio.sent[0]);
+  EXPECT_TRUE(receiving_node.mesh.has_route("node-a"));
+}
+
+static void test_runtime_max_hops_clamps_to_minimum_advertisable_edge() {
+  TestNode advertising_node("node-a");
+  advertising_node.mesh.set_max_hops(0);
+  advance_and_loop(advertising_node, 30000);
+
+  EXPECT_EQ(advertising_node.radio.sent.size(), 1u);
+  EXPECT_EQ(advertising_node.radio.sent[0][18], 1u);
+
+  TestNode receiving_node("node-d");
+  receiving_node.receive(advertising_node.radio.sent[0]);
+  EXPECT_TRUE(receiving_node.mesh.has_route("node-a"));
 }
 
 static void test_protocol_v3_hello_is_rejected_without_route_state() {
@@ -1407,6 +1449,8 @@ int main() {
   RUN_TEST(test_binary_span_send_does_not_allocate_and_round_trips);
   RUN_TEST(test_own_hello_has_v4_body_at_offset_28);
   RUN_TEST(test_hello_builds_direct_and_advertised_routes);
+  RUN_TEST(test_maximum_valid_route_is_advertised_without_poisoning_hello);
+  RUN_TEST(test_runtime_max_hops_clamps_to_minimum_advertisable_edge);
   RUN_TEST(test_protocol_v3_hello_is_rejected_without_route_state);
   RUN_TEST(test_forged_hello_does_not_poison_seen_cache_or_discovery_state);
   RUN_TEST(test_wrong_key_hello_cannot_create_gateway_or_route);

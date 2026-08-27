@@ -53,7 +53,14 @@ class LoraMesh : public Component {
     this->node_id_template_ = node_id;
     this->has_node_id_ = true;
   }
-  void set_max_hops(uint8_t max_hops) { this->max_hops_ = max_hops; }
+  void set_max_hops(uint8_t max_hops) {
+    this->max_hops_ = max_hops;
+    if (this->max_hops_ < MESH_MIN_ADVERTISED_HOPS) {
+      this->max_hops_ = MESH_MIN_ADVERTISED_HOPS;
+    } else if (this->max_hops_ > MESH_MAX_ADVERTISED_HOPS) {
+      this->max_hops_ = MESH_MAX_ADVERTISED_HOPS;
+    }
+  }
   void set_discovery_interval(uint32_t ms) { this->discovery_interval_ms_ = ms; }
   void set_route_ttl(uint32_t ms) { this->route_ttl_ms_ = ms; }
   void set_seen_cache_ttl(uint32_t ms) { this->seen_cache_ttl_ms_ = ms; }

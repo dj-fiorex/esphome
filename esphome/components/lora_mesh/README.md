@@ -47,7 +47,7 @@ lora_mesh:
 | `radio_id` | required | SX126x or SX127x radio used by the mesh. |
 | `fabric_key` | required | Exactly 32 hexadecimal characters (128 bits). Use `!secret` in production. |
 | `node_id` | MAC-derived | Templatable human-readable Node ID. |
-| `max_hops` | `8` | Maximum new-packet TTL and accepted Route length. |
+| `max_hops` | `8` | Maximum new-packet TTL and accepted Route length (`1` through `254`). |
 | `discovery_interval` | `30s` | Periodic authenticated HELLO interval; minimum `5ms`. |
 | `route_ttl` | `90s` | Route lease; the default detects abrupt loss after about three missed HELLOs. |
 | `max_routes` | `16` | Compile-time Route-table capacity. |

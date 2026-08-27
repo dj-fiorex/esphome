@@ -458,8 +458,9 @@ bool LoraMesh::validate_hello_packet_(const uint8_t *pkt, size_t pkt_len) const 
     uint32_t advertised_destination = get_u32_le(pkt + pos + ROUTE_ADV_OFF_DEST_ID);
     uint8_t advertised_hops = pkt[pos + ROUTE_ADV_OFF_HOP_COUNT];
     uint8_t route_flags = pkt[pos + ROUTE_ADV_OFF_FLAGS];
-    if (advertised_destination == MESH_BROADCAST_ID || advertised_destination == src_id || advertised_hops == 0 ||
-        advertised_hops == UINT8_MAX || (route_flags & ~ROUTE_FLAG_IS_GATEWAY) != 0) {
+    if (advertised_destination == MESH_BROADCAST_ID || advertised_destination == src_id ||
+        advertised_hops < MESH_MIN_ADVERTISED_HOPS || advertised_hops > MESH_MAX_ADVERTISED_HOPS ||
+        (route_flags & ~ROUTE_FLAG_IS_GATEWAY) != 0) {
       return false;
     }
   }
@@ -896,6 +897,9 @@ bool LoraMesh::update_gateway_state_(RouteEntry *route, bool is_gateway) {
 }
 
 void LoraMesh::update_route_(uint32_t dst_id, uint32_t next_hop, uint8_t hops, bool is_gw, float rssi, float snr) {
+  if (hops < MESH_MIN_ADVERTISED_HOPS || hops > MESH_MAX_ADVERTISED_HOPS) {
+    return;
+  }
   uint32_t now = millis();
   RouteEntry *r = this->find_route_(dst_id);
   bool changed = false;

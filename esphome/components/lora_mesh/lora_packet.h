@@ -105,6 +105,8 @@ static constexpr size_t ROUTE_ADV_OFF_PATH_RSSI = 5;
 static constexpr size_t ROUTE_ADV_OFF_FLAGS = 6;
 static constexpr size_t ROUTE_ADV_SIZE = 7;
 static constexpr uint8_t ROUTE_FLAG_IS_GATEWAY = 0x01;
+static constexpr uint8_t MESH_MIN_ADVERTISED_HOPS = 1;
+static constexpr uint8_t MESH_MAX_ADVERTISED_HOPS = UINT8_MAX - 1;
 
 // ───────────────────────────────────────────────────────────────────────────
 // DATA payload (after the 28-byte header)

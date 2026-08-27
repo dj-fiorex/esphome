@@ -87,7 +87,7 @@ CONFIG_SCHEMA = cv.All(
                 cv.All(cv.string, _validate_fabric_key)
             ),
             # Routing parameters
-            cv.Optional(CONF_MAX_HOPS, default=8): cv.int_range(min=1, max=255),
+            cv.Optional(CONF_MAX_HOPS, default=8): cv.int_range(min=1, max=254),
             cv.Optional(CONF_DISCOVERY_INTERVAL, default="30s"): cv.All(
                 cv.positive_time_period_milliseconds,
                 cv.Range(min=cv.TimePeriod(milliseconds=5)),

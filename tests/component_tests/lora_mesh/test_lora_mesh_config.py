@@ -83,3 +83,15 @@ def test_discovery_interval_defaults_to_thirty_seconds() -> None:
     config = _validate_lora_mesh_config()
 
     assert config["discovery_interval"].total_milliseconds == 30_000
+
+
+def test_max_hops_rejects_route_length_that_cannot_be_advertised() -> None:
+    with pytest.raises(cv.Invalid):
+        _validate_lora_mesh_config(max_hops=255)
+
+
+@pytest.mark.parametrize("max_hops", (1, 254))
+def test_max_hops_accepts_advertisable_route_length_edges(max_hops: int) -> None:
+    config = _validate_lora_mesh_config(max_hops=max_hops)
+
+    assert config["max_hops"] == max_hops
