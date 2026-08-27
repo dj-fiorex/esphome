@@ -88,9 +88,10 @@ CONFIG_SCHEMA = cv.All(
             ),
             # Routing parameters
             cv.Optional(CONF_MAX_HOPS, default=8): cv.int_range(min=1, max=255),
-            cv.Optional(
-                CONF_DISCOVERY_INTERVAL, default="30s"
-            ): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_DISCOVERY_INTERVAL, default="30s"): cv.All(
+                cv.positive_time_period_milliseconds,
+                cv.Range(min=cv.TimePeriod(milliseconds=5)),
+            ),
             cv.Optional(
                 CONF_ROUTE_TTL, default="90s"
             ): cv.positive_time_period_milliseconds,

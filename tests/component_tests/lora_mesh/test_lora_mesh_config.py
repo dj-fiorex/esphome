@@ -63,3 +63,23 @@ def test_nearest_gateway_diagnostic_uses_canonical_name() -> None:
     config = _validate_lora_mesh_config(nearest_gateway_sensor_id="nearest_gateway")
 
     assert config["nearest_gateway_sensor_id"].id == "nearest_gateway"
+
+
+@pytest.mark.parametrize("discovery_interval", ("0ms", "1ms", "4ms"))
+def test_discovery_interval_rejects_values_unsafe_for_setup_jitter(
+    discovery_interval: str,
+) -> None:
+    with pytest.raises(cv.Invalid):
+        _validate_lora_mesh_config(discovery_interval=discovery_interval)
+
+
+def test_discovery_interval_accepts_minimum_safe_setup_jitter_value() -> None:
+    config = _validate_lora_mesh_config(discovery_interval="5ms")
+
+    assert config["discovery_interval"].total_milliseconds == 5
+
+
+def test_discovery_interval_defaults_to_thirty_seconds() -> None:
+    config = _validate_lora_mesh_config()
+
+    assert config["discovery_interval"].total_milliseconds == 30_000
