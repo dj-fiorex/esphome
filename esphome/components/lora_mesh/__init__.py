@@ -224,8 +224,10 @@ async def to_code(config) -> None:
         ts = await cg.get_variable(config[CONF_ROUTING_TABLE_SENSOR_ID])
         cg.add(var.set_routing_table_sensor(ts))
 
-    if CONF_NEAREST_GATEWAY_SENSOR_ID in config:
-        ts = await cg.get_variable(config[CONF_NEAREST_GATEWAY_SENSOR_ID])
+    if (
+        nearest_gateway_sensor_id := config.get(CONF_NEAREST_GATEWAY_SENSOR_ID)
+    ) is not None:
+        ts = await cg.get_variable(nearest_gateway_sensor_id)
         cg.add(var.set_nearest_gateway_sensor(ts))
 
 
