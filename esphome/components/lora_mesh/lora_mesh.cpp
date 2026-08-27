@@ -583,7 +583,7 @@ void LoraMesh::process_data_(const uint8_t *pkt, size_t pkt_len, size_t offset, 
       }
       LoraMesh::id_to_hex(dst_id, msg.destination);
       LoraMesh::id_to_hex(prev_hop, msg.prev_hop);
-      msg.payload = std::span<const uint8_t>(plaintext, payload_len);
+      msg.payload.assign(plaintext, plaintext + payload_len);
       msg.frame_counter = frame_counter;
       msg.hop_count = hop_count;
       msg.ttl = ttl;

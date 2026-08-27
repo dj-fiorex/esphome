@@ -65,16 +65,13 @@ class LoraMesh : public Component {
   bool broadcast_message(std::span<const uint8_t> payload);
   bool send_to_gateway(std::span<const uint8_t> payload);
   bool send_message(const std::string &destination, const std::string &payload) {
-    return this->send_message(
-        destination, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(payload.data()), payload.size()));
+    return this->send_message(destination, LoraMesh::payload_as_bytes_(payload));
   }
   bool broadcast_message(const std::string &payload) {
-    return this->broadcast_message(
-        std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(payload.data()), payload.size()));
+    return this->broadcast_message(LoraMesh::payload_as_bytes_(payload));
   }
   bool send_to_gateway(const std::string &payload) {
-    return this->send_to_gateway(
-        std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(payload.data()), payload.size()));
+    return this->send_to_gateway(LoraMesh::payload_as_bytes_(payload));
   }
   void set_upstream_connected(bool connected);
   bool has_route(const std::string &node_id) const;
@@ -187,6 +184,9 @@ class LoraMesh : public Component {
   void publish_diagnostics_();
 
   // ── Utility ───────────────────────────────────────────────────────────
+  static std::span<const uint8_t> payload_as_bytes_(const std::string &payload) {
+    return {reinterpret_cast<const uint8_t *>(payload.data()), payload.size()};
+  }
   static void id_to_hex(uint32_t id, char out[9]);
   uint32_t next_frame_counter_();
 

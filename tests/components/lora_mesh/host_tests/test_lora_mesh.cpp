@@ -1087,6 +1087,30 @@ static void test_receive_dispatch_does_not_allocate() {
   EXPECT_TRUE(memcmp(delivered.data(), payload.data(), payload.size()) == 0);
 }
 
+static void test_message_copy_owns_payload_for_deferred_automation() {
+  FakeRadio radio;
+  LoraMesh mesh(TEST_FABRIC_KEY_HEX);
+  mesh.set_radio(&radio);
+  mesh.set_node_id(esphome::TemplatableValue<std::string>("node-b"));
+
+  esphome::lora_mesh::MeshMessage retained;
+  const uint8_t *callback_payload_data = nullptr;
+  mesh.add_on_message_callback([&](const esphome::lora_mesh::MeshMessage &message) {
+    callback_payload_data = message.payload.data();
+    retained = message;
+  });
+  mesh.setup();
+  mesh.loop();
+
+  const std::string payload(64, 'x');
+  auto packet = make_data(FABRIC, NODE_A, NODE_B, NODE_B, payload, 10, 8, 0, NODE_A);
+  mesh.on_radio_packet(packet.data(), packet.size(), -60.0f, 8.0f);
+
+  EXPECT_TRUE(retained.payload.data() != callback_payload_data);
+  EXPECT_EQ(retained.payload.size(), payload.size());
+  EXPECT_TRUE(memcmp(retained.payload.data(), payload.data(), payload.size()) == 0);
+}
+
 static void test_wrong_key_drops_packet() {
   static const uint8_t WRONG_KEY[FABRIC_KEY_SIZE] = {0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8,
                                                      0xF7, 0xF6, 0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0};
@@ -1254,6 +1278,7 @@ int main() {
   // Fabric Key DATA security / replay tests
   RUN_TEST(test_same_fabric_key_decrypts_payload);
   RUN_TEST(test_receive_dispatch_does_not_allocate);
+  RUN_TEST(test_message_copy_owns_payload_for_deferred_automation);
   RUN_TEST(test_wrong_key_drops_packet);
   RUN_TEST(test_modified_data_does_not_reach_application_callback);
   RUN_TEST(test_modified_data_flags_do_not_reach_application_callback);

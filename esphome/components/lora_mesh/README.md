@@ -129,10 +129,11 @@ application acknowledgements, durable command sequencing, and retries remain out
 ## Automations and diagnostics
 
 `on_message` receives a `MeshMessage` with source, optional source name, destination, previous hop, payload, counter,
-hop count, TTL, RSSI, SNR, and broadcast/destination flags. `MeshMessage.payload` is a zero-copy
-`std::span<const uint8_t>` that is valid only during the callback. Copy it in the application callback if it must be
-retained. This is a breaking change from the former owning `std::string`; text consumers should use `payload.data()`
-with `payload.size()` as shown above. `on_route_update` fires when observable Route state changes.
+hop count, TTL, RSSI, SNR, and broadcast/destination flags. `MeshMessage.payload` is an owning, fixed-capacity
+`StaticVector<uint8_t, MESH_MAX_DATA_PAYLOAD_SIZE>`. It stays valid when ESPHome copies the message into a delayed
+automation action, without allocating. This is a breaking change from the former owning `std::string`; text consumers
+should use `payload.data()` with `payload.size()` as shown above. `on_route_update` fires when observable Route state
+changes.
 
 Optional diagnostics are connected by ID:
 
@@ -168,9 +169,11 @@ size_t get_known_node_count() const;
 ```
 
 The byte-span overloads and fixed-capacity packet buffers do not allocate in the send path. Receive decryption uses a
-fixed stack buffer and exposes the callback-scoped payload span without allocating. Diagnostic string-returning
-helpers (`get_routing_table_json()`, `get_nearest_gateway()`, and the link-simulator blocklist formatter) retain
-owning strings because they run only on explicit diagnostic/configuration paths, not per-packet builders or dispatch.
+fixed stack buffer and copies plaintext into the message's inline fixed-capacity payload without allocating. The
+owning buffer, rather than a non-owning view, preserves payload lifetime when ESPHome stores automation arguments for
+later actions. Diagnostic string-returning helpers (`get_routing_table_json()`, `get_nearest_gateway()`, and the
+link-simulator blocklist formatter) retain owning strings because they run only on explicit diagnostic/configuration
+paths, not per-packet builders or dispatch.
 
 ## Protocol v4 security
 
