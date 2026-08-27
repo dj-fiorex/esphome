@@ -95,8 +95,11 @@ Pending Gateway changes are not evicted to admit newly learned Routes before the
 
 A Gateway that loses power cannot send a Gateway Withdrawal. That case deliberately uses ordinary self-healing:
 neighbour and dependent Routes expire, then `send_to_gateway()` evaluates the remaining Routes and selects the current
-alternative. The default 30-second `discovery_interval` and 90-second `route_ttl` model roughly three missed HELLOs.
-There is no Gateway-specific heartbeat, probe, timeout, Route discovery exchange, payload persistence, or mesh retry.
+alternative. A bounded Route Hold-down rejects only worse indirect candidates after expiry so neighbours cannot feed a
+stale dependent Route back to each other; direct and equal-or-better alternatives remain immediately eligible. Active
+hold-down tombstones retain their fixed Route-table slots, and delayed queued HELLOs are refreshed before transmission.
+The default 30-second `discovery_interval` and 90-second `route_ttl` model roughly three missed HELLOs. There is no
+Gateway-specific heartbeat, probe, timeout, Route discovery exchange, payload persistence, or mesh retry.
 
 ## Sending
 

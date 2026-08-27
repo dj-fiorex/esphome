@@ -115,18 +115,20 @@ void LoraMesh::setup() {
 void LoraMesh::loop() {
   uint32_t now = millis();
 
+  // Expire Routes before building this interval's HELLO. Advertising a Route
+  // in the same loop iteration that invalidates it gives neighbours one final
+  // stale lease and defeats bounded withdrawal.
+  if (now - this->last_expire_check_ >= this->ROUTE_EXPIRY_CHECK_INTERVAL_MS) {
+    this->last_expire_check_ = now;
+    this->expire_routes_();
+    this->expire_seen_();
+  }
+
   // Periodic and transition-triggered HELLOs share one coalesced, rate-limited path.
   if (now - this->last_hello_ >= this->discovery_interval_ms_) {
     this->hello_update_pending_ = true;
   }
   this->queue_pending_hello_(now);
-
-  // Route and seen-cache expiry (every 10 s).
-  if (now - this->last_expire_check_ >= 10000) {
-    this->last_expire_check_ = now;
-    this->expire_routes_();
-    this->expire_seen_();
-  }
 
   // Diagnostic sensor publishing (every 30 s).
   if (now - this->last_diag_publish_ >= 30000) {
@@ -229,6 +231,7 @@ std::string LoraMesh::get_nearest_gateway() const {
 void LoraMesh::clear_routes() {
   for (auto &r : this->routes_) {
     r.is_valid = false;
+    r.hold_down = false;
   }
   this->notify_route_changed_();
   ESP_LOGI(TAG, "Routing table cleared");
@@ -495,6 +498,7 @@ void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset,
   }
 
   // A packet from another protocol version must not change mesh state.
+  this->clear_route_hold_down_(src_id);
   this->update_route_(src_id, src_id, 1, src_is_gateway, rssi, snr);
 
   uint8_t name_len = pkt[offset + 1];
@@ -523,6 +527,9 @@ void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset,
     }
     uint16_t new_hops = static_cast<uint16_t>(adv_hops) + 1;
     if (new_hops > this->max_hops_) {
+      continue;
+    }
+    if (this->is_route_held_down_(adv_dst, static_cast<uint8_t>(new_hops))) {
       continue;
     }
     float path_rssi = std::min(advertised_rssi, rssi);
@@ -599,6 +606,10 @@ void LoraMesh::process_data_(const uint8_t *pkt, size_t pkt_len, const uint8_t *
     route = this->find_route_(dst_id);
     if (route == nullptr) {
       ESP_LOGW(TAG, "No route to forward 0x%08" PRIX32, dst_id);
+      return;
+    }
+    if (route->next_hop_id == prev_hop) {
+      ESP_LOGW(TAG, "Refusing to forward 0x%08" PRIX32 " back to previous hop 0x%08" PRIX32, dst_id, prev_hop);
       return;
     }
   }
@@ -777,18 +788,40 @@ void LoraMesh::drain_tx_queue_(uint32_t now) {
   if (static_cast<int32_t>(now - this->tx_next_tx_at_) < 0) {
     return;
   }
-  if (this->radio_ != nullptr) {
-    this->radio_->transmit_packet(this->tx_queue_[this->tx_queue_head_]);
+  Packet &queued_packet = this->tx_queue_[this->tx_queue_head_];
+  bool is_hello = queued_packet.size() > MESH_OFF_PKT_TYPE &&
+                  queued_packet[MESH_OFF_PKT_TYPE] == static_cast<uint8_t>(PacketType::HELLO);
+  Packet refreshed_hello;
+  const Packet *packet_to_send = &queued_packet;
+  if (is_hello && this->queued_hello_state_ == QueuedHelloState::STALE) {
+    refreshed_hello = this->build_hello_packet_();
+    packet_to_send = &refreshed_hello;
+  }
+  if (this->radio_ != nullptr && !packet_to_send->empty()) {
+    this->radio_->transmit_packet(*packet_to_send);
+  }
+  if (is_hello) {
+    if (!packet_to_send->empty()) {
+      this->acknowledge_advertised_gateway_updates_(*packet_to_send);
+    }
+    this->hello_update_pending_ = this->has_pending_gateway_updates_();
+    this->queued_hello_state_ = QueuedHelloState::NONE;
   }
   this->tx_queue_head_ = (this->tx_queue_head_ + 1) % this->tx_queue_.size();
   --this->tx_queue_count_;
   this->tx_backoff_armed_ = false;
 }
 
-void LoraMesh::schedule_hello_update_() { this->hello_update_pending_ = true; }
+void LoraMesh::schedule_hello_update_() {
+  this->hello_update_pending_ = true;
+  if (this->queued_hello_state_ != QueuedHelloState::NONE) {
+    this->queued_hello_state_ = QueuedHelloState::STALE;
+  }
+}
 
 void LoraMesh::queue_pending_hello_(uint32_t now) {
-  if (!this->hello_update_pending_ || now - this->last_hello_ < HELLO_UPDATE_MIN_INTERVAL_MS) {
+  if (!this->hello_update_pending_ || this->queued_hello_state_ != QueuedHelloState::NONE ||
+      now - this->last_hello_ < this->HELLO_UPDATE_MIN_INTERVAL_MS) {
     return;
   }
   auto pkt = this->build_hello_packet_();
@@ -796,8 +829,7 @@ void LoraMesh::queue_pending_hello_(uint32_t now) {
     return;
   }
   if (this->enqueue_tx_(pkt)) {
-    this->acknowledge_advertised_gateway_updates_(pkt);
-    this->hello_update_pending_ = this->has_pending_gateway_updates_();
+    this->queued_hello_state_ = QueuedHelloState::CURRENT;
     this->last_hello_ = now;
     ESP_LOGD(TAG, "HELLO queued (%zu bytes)", pkt.size());
   }
@@ -871,8 +903,13 @@ const RouteEntry *LoraMesh::find_nearest_gateway_route_() const {
 }
 
 RouteEntry *LoraMesh::alloc_route_slot_() {
+  uint32_t now = millis();
   for (auto &r : this->routes_) {
     if (!r.is_valid) {
+      if (r.hold_down && static_cast<int32_t>(r.expires_at - now) > 0) {
+        continue;
+      }
+      r.hold_down = false;
       return &r;
     }
   }
@@ -881,6 +918,9 @@ RouteEntry *LoraMesh::alloc_route_slot_() {
   // if every Route is pending, defer learning the new Route until a later HELLO.
   RouteEntry *worst = nullptr;
   for (auto &r : this->routes_) {
+    if (!r.is_valid) {
+      continue;
+    }
     if (r.gateway_update_pending) {
       continue;
     }
@@ -956,13 +996,15 @@ void LoraMesh::expire_routes_() {
   for (auto &r : this->routes_) {
     if (r.is_valid && static_cast<int32_t>(r.expires_at - now) <= 0) {
       ESP_LOGD(TAG, "Route to 0x%08" PRIX32 " expired", r.dst_id);
-      r.is_valid = false;
+      uint32_t expired_destination = r.dst_id;
+      bool direct_neighbor_expired = r.dst_id == r.next_hop_id;
+      this->hold_down_route_(r, now);
       any = true;
       // Passive self-healing (ADR 0002): a direct neighbour going silent
       // invalidates every Route using it as Next Hop, so those destinations are
       // re-learned from other neighbours' HELLOs instead of black-holing.
-      if (r.dst_id == r.next_hop_id) {
-        this->invalidate_routes_via_(r.dst_id);
+      if (direct_neighbor_expired) {
+        this->invalidate_routes_via_(expired_destination);
       }
     }
   }
@@ -972,15 +1014,60 @@ void LoraMesh::expire_routes_() {
 }
 
 void LoraMesh::invalidate_routes_via_(uint32_t neighbor_id) {
+  uint32_t now = millis();
   for (auto &r : this->routes_) {
     if (r.is_valid && r.next_hop_id == neighbor_id) {
       ESP_LOGD(TAG, "Route to 0x%08" PRIX32 " invalidated (next hop 0x%08" PRIX32 " lost)", r.dst_id, neighbor_id);
-      r.is_valid = false;
+      this->hold_down_route_(r, now);
+    }
+  }
+}
+
+bool LoraMesh::is_route_held_down_(uint32_t dst_id, uint8_t candidate_hops) {
+  uint32_t now = millis();
+  for (auto &route : this->routes_) {
+    if (!route.hold_down || route.dst_id != dst_id) {
+      continue;
+    }
+    if (static_cast<int32_t>(route.expires_at - now) <= 0) {
+      route.hold_down = false;
+      return false;
+    }
+    // A count-to-infinity path is necessarily worse than the Route we just
+    // lost. Equal-or-better alternatives are safe and should heal immediately.
+    if (candidate_hops <= route.hop_count) {
+      route.hold_down = false;
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+void LoraMesh::hold_down_route_(RouteEntry &route, uint32_t now) {
+  route.is_valid = false;
+  route.hold_down = true;
+  // One Route lease lets neighbours age out their dependent Route; one expiry
+  // scan interval covers the scheduler's bounded detection granularity.
+  route.expires_at = now + this->route_ttl_ms_ + this->ROUTE_EXPIRY_CHECK_INTERVAL_MS;
+  if (this->queued_hello_state_ != QueuedHelloState::NONE) {
+    this->queued_hello_state_ = QueuedHelloState::STALE;
+  }
+}
+
+void LoraMesh::clear_route_hold_down_(uint32_t dst_id) {
+  for (auto &route : this->routes_) {
+    if (route.hold_down && route.dst_id == dst_id) {
+      route.hold_down = false;
+      return;
     }
   }
 }
 
 void LoraMesh::notify_route_changed_() {
+  if (this->queued_hello_state_ != QueuedHelloState::NONE) {
+    this->queued_hello_state_ = QueuedHelloState::STALE;
+  }
   this->route_update_callback_();
   this->publish_diagnostics_();
 }

@@ -98,8 +98,15 @@ rate-limited HELLOs. A Route with a pending Gateway change is protected from tab
 those HELLOs advertises its final state.
 
 Abrupt disappearance has no withdrawal packet. Ordinary neighbour and dependent-Route expiry remains the only failure
-detector. The production defaults pair a 30-second periodic HELLO with a 90-second Route lease, approximately three
-missed HELLOs; the next `send_to_gateway()` call selects from the Routes still valid after expiry.
+detector. Expiry happens before that loop iteration's HELLO is built. After expiry, a local fixed-capacity Route
+Hold-down rejects indirect candidates with a greater hop count than the lost Route for one Route lease plus the
+expiry-scan interval; this prevents neighbours from reintroducing each other's stale dependent Routes. Direct and
+equal-or-better alternatives remain immediately eligible, and a genuinely longer alternative becomes eligible when
+the bounded hold-down ends. Hold-down tombstones retain their Route-table slots so capacity pressure fails closed. A
+HELLO delayed in the TX queue is refreshed from current Route state immediately before radio transmission. This state
+is local and does not change the protocol-v4 HELLO format. The production defaults pair a 30-second periodic HELLO
+with a 90-second Route lease, approximately three missed HELLOs; the next `send_to_gateway()` call selects from the
+Routes still valid after expiry.
 
 ## Persistent counters and replay protection
 

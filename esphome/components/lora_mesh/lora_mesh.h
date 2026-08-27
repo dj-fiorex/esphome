@@ -171,6 +171,9 @@ class LoraMesh : public Component {
   RouteEntry *alloc_route_slot_();
   void expire_routes_();
   void invalidate_routes_via_(uint32_t neighbor_id);
+  bool is_route_held_down_(uint32_t dst_id, uint8_t candidate_hops);
+  void clear_route_hold_down_(uint32_t dst_id);
+  void hold_down_route_(RouteEntry &route, uint32_t now);
   void notify_route_changed_();
 
   // ── Duplicate suppression ──────────────────────────────────────────────
@@ -226,6 +229,8 @@ class LoraMesh : public Component {
   bool upstream_connected_{false};
   bool setup_complete_{false};
   bool hello_update_pending_{false};
+  enum class QueuedHelloState : uint8_t { NONE, CURRENT, STALE };
+  QueuedHelloState queued_hello_state_{QueuedHelloState::NONE};
   uint8_t max_hops_{8};
   uint32_t discovery_interval_ms_{30000};
   uint32_t route_ttl_ms_{90000};
@@ -236,6 +241,7 @@ class LoraMesh : public Component {
   uint32_t last_expire_check_{0};
   uint32_t last_diag_publish_{0};
   static constexpr uint32_t HELLO_UPDATE_MIN_INTERVAL_MS = 1000;
+  static constexpr uint32_t ROUTE_EXPIRY_CHECK_INTERVAL_MS = 10000;
 
   // ── Frame counter persistence (batched NVS writes) ────────────────────
   // We persist frame_counter_ in batches: on boot we load the persisted value

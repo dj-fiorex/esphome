@@ -59,6 +59,26 @@ static bool hello_advertises_gateway_state(const std::vector<uint8_t> &hello, ui
   return false;
 }
 
+static bool hello_advertises_destination(const std::vector<uint8_t> &hello, uint32_t destination_id) {
+  for (size_t index = 0; index < hello_route_count(hello); ++index) {
+    if (hello_route_at(hello, index).dest_id == destination_id) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool route_uses_next_hop(const TestNode &node, uint32_t destination_id, uint32_t next_hop_id) {
+  char destination[9];
+  char next_hop[9];
+  snprintf(destination, sizeof(destination), "%08X", destination_id);
+  snprintf(next_hop, sizeof(next_hop), "%08X", next_hop_id);
+  std::string routes = node.mesh.get_routing_table_json();
+  size_t destination_pos = routes.find(std::string("\"dst\":\"") + destination + "\"");
+  return destination_pos != std::string::npos &&
+         routes.find(std::string("\"nh\":\"") + next_hop + "\"", destination_pos) != std::string::npos;
+}
+
 static void test_protocol_v4_derives_fabric_id_and_uses_eight_byte_data_tag() {
   TestNode a("node-a");
 
@@ -497,6 +517,20 @@ static void test_non_next_hop_relay_does_not_forward_unicast() {
   EXPECT_EQ(d.radio.sent.size(), 0u);  // single-path: only B forwards
 }
 
+static void test_forwarder_does_not_return_unicast_to_previous_hop() {
+  TestNode b("node-b");
+
+  // This is the transient cyclic state from A—B—C loss: B has accepted an
+  // indirect Route to C from A, while A sends DATA expecting B to reach C.
+  b.receive(make_hello(FABRIC, NODE_A, "node-a", {{NODE_C, 2, -70}}));
+  b.radio.sent.clear();
+  b.receive(make_data(FABRIC, NODE_D, NODE_C, NODE_B, "must not bounce", 7, 8, 1, NODE_A));
+  b.mesh.loop();
+
+  EXPECT_EQ(b.received.size(), 0u);
+  EXPECT_EQ(b.radio.sent.size(), 0u);
+}
+
 // ── Slice 6: broadcast still floods ─────────────────────────────────────────
 
 static void test_relay_rebroadcasts_broadcast_and_delivers_it() {
@@ -696,6 +730,85 @@ static void test_better_path_still_replaces_worse_route() {
   a.mesh.loop();
   EXPECT_EQ(a.radio.sent.size(), 1u);
   EXPECT_EQ(get_u32_le(&a.radio.sent[0][24]), NODE_D);  // next_hop moved to D
+}
+
+static void test_distributed_neighbor_loss_converges_without_a_count_to_infinity_loop() {
+  TestNode a("node-a"), b("node-b"), c("node-c"), d("node-d");
+  std::array<TestNode *, 4> nodes{{&a, &b, &c, &d}};
+  TestTopology<4> topology(nodes);
+  topology.connect(0, 1);  // A—B
+  topology.connect(1, 2);  // B—C
+
+  for (TestNode *node : nodes) {
+    node->mesh.set_discovery_interval(10000);
+    node->mesh.set_route_ttl(30000);
+    node->mesh.set_tx_jitter(0);
+  }
+
+  // Normal HELLO discovery reaches both ends of A—B—C.
+  for (int round = 0; round < 3; ++round) {
+    topology.advance(10000);
+  }
+  EXPECT_TRUE(a.mesh.has_route("node-c"));
+  EXPECT_TRUE(c.mesh.has_route("node-a"));
+  EXPECT_TRUE(route_uses_next_hop(a, NODE_C, NODE_B));
+
+  // C disappears from B. Advance HELLO and lease time far enough for both B's
+  // direct Route and A's dependent Route to expire. At no round may A and B
+  // install each other as Next Hop for C (the count-to-infinity failure).
+  topology.disconnect(1, 2);
+  for (int round = 0; round < 7; ++round) {
+    topology.advance(10000);
+    EXPECT_FALSE(route_uses_next_hop(a, NODE_C, NODE_B) && route_uses_next_hop(b, NODE_C, NODE_A));
+  }
+  EXPECT_FALSE(a.mesh.has_route("node-c"));
+  EXPECT_FALSE(b.mesh.has_route("node-c"));
+  EXPECT_FALSE(a.mesh.send_message("node-c", "must-not-loop"));
+
+  // A newly available B—D—C path is learned after the bounded suppression
+  // interval, and DATA crosses the healed single path exactly once per hop.
+  topology.connect(1, 3);  // B—D
+  topology.connect(3, 2);  // D—C
+  for (int round = 0; round < 4; ++round) {
+    topology.advance(10000);
+  }
+  EXPECT_TRUE(a.mesh.has_route("node-c"));
+  EXPECT_TRUE(route_uses_next_hop(a, NODE_C, NODE_B));
+  EXPECT_TRUE(route_uses_next_hop(b, NODE_C, NODE_D));
+
+  EXPECT_TRUE(a.mesh.send_message("node-c", "healed"));
+  size_t data_transmissions = 0;
+  for (int round = 0; round < 4 && c.received.empty(); ++round) {
+    data_transmissions += topology.run_round();
+  }
+  EXPECT_EQ(c.received.size(), 1u);
+  EXPECT_TRUE(c.received[0].payload == "healed");
+  EXPECT_EQ(data_transmissions, 3u);  // A, B, and D; no cyclic bounce.
+}
+
+static void test_delayed_queued_hello_is_refreshed_after_route_expiry() {
+  TestNode b("node-b");
+  b.mesh.set_discovery_interval(10000);
+  b.mesh.set_route_ttl(30000);
+  b.mesh.set_tx_jitter(50000);
+  b.receive(make_hello(FABRIC, NODE_C, "node-c"));
+
+  // Queue a HELLO advertising C, but hold it behind a deterministic 40-second
+  // TX backoff so C expires before the packet reaches the radio.
+  esphome::test_random_set(40000);
+  advance_and_loop(b, 10000);
+  EXPECT_EQ(b.radio.sent.size(), 0u);
+
+  advance_and_loop(b, 30000);
+  EXPECT_FALSE(b.mesh.has_route("node-c"));
+  EXPECT_EQ(b.radio.sent.size(), 0u);
+
+  // The queued HELLO is rebuilt at transmission and must withdraw C instead
+  // of granting a fresh stale lease to a neighbour.
+  advance_and_loop(b, 10000);
+  EXPECT_EQ(b.radio.sent.size(), 1u);
+  EXPECT_EQ(b.radio.sent[0][esphome::lora_mesh::MESH_OFF_PKT_TYPE], PKT_HELLO);
+  EXPECT_FALSE(hello_advertises_destination(b.radio.sent[0], NODE_C));
 }
 
 // ── Gateway flag refresh on re-confirmation ─────────────────────────────────
@@ -1506,6 +1619,7 @@ int main() {
   RUN_TEST(test_duplicate_frame_counter_suppressed);
   RUN_TEST(test_designated_next_hop_forwards_and_rewrites_header);
   RUN_TEST(test_non_next_hop_relay_does_not_forward_unicast);
+  RUN_TEST(test_forwarder_does_not_return_unicast_to_previous_hop);
   RUN_TEST(test_relay_rebroadcasts_broadcast_and_delivers_it);
   RUN_TEST(test_three_node_line_unicast_and_broadcast);
   RUN_TEST(test_multihop_route_lease_renewed_on_reconfirmation);
@@ -1513,6 +1627,8 @@ int main() {
   RUN_TEST(test_multihop_route_reconfirmation_updates_degraded_path_rssi);
   RUN_TEST(test_better_path_still_replaces_worse_route);
   RUN_TEST(test_dead_next_hop_invalidates_dependent_routes);
+  RUN_TEST(test_distributed_neighbor_loss_converges_without_a_count_to_infinity_loop);
+  RUN_TEST(test_delayed_queued_hello_is_refreshed_after_route_expiry);
   RUN_TEST(test_gateway_flag_refreshed_when_neighbor_becomes_gateway);
   RUN_TEST(test_upstream_connectivity_starts_false_and_only_real_transitions_schedule_hello);
   RUN_TEST(test_route_advertisement_propagates_gateway_and_weakest_path_rssi);

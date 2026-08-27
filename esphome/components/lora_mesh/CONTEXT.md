@@ -60,6 +60,10 @@ _Avoid_: beacon, advertisement (used loosely; HELLO is the concrete packet).
 **Route**:
 A routing-table entry: destination hash, Next Hop hash, hop count, Path RSSI/SNR, Gateway flag, and expiry. Route choice uses fewest hops, strongest Path RSSI, then lowest unsigned destination Node ID.
 
+**Route Hold-down**:
+A temporary refusal to replace an expired Route with a worse indirect Route. It prevents neighbours from feeding a stale dependent Route back to each other while still allowing direct, equal-length, and shorter alternatives to heal immediately.
+_Avoid_: blacklist, ban (the destination is not permanently excluded).
+
 **Seen-cache**:
 A fixed ring buffer of `(src_id, frame_counter)` pairs used to suppress duplicate processing/forwarding of the same packet.
 _Avoid_: dedup table.

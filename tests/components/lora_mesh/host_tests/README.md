@@ -2,8 +2,8 @@
 
 Behavior tests for protocol-v4 authenticated discovery, Upstream Connectivity,
 Nearest Gateway routing, single-path unicast Forwarding, flood broadcast,
-Gateway promotion and Withdrawal, three-missed-HELLO expiry, duplicate
-suppression, DATA security, and replay handling. They run natively
+Gateway promotion and Withdrawal, distributed HELLO/lease expiry and Route
+Hold-down, duplicate suppression, DATA security, and replay handling. They run natively
 on the development machine — no hardware and no PlatformIO.
 
 ```bash

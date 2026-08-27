@@ -162,6 +162,55 @@ struct TestNode {
   }
 };
 
+// Advances real LoraMesh instances through the public radio boundary. Packets
+// transmitted in one round are delivered to linked neighbours before the next
+// round, making HELLO/lease progression and DATA forwarding deterministic.
+template<size_t N> class TestTopology {
+ public:
+  explicit TestTopology(const std::array<TestNode *, N> &nodes) : nodes_(nodes) {}
+
+  void connect(size_t left, size_t right) {
+    this->links_[left][right] = true;
+    this->links_[right][left] = true;
+  }
+
+  void disconnect(size_t left, size_t right) {
+    this->links_[left][right] = false;
+    this->links_[right][left] = false;
+  }
+
+  size_t advance(uint32_t ms) {
+    esphome::test_clock_advance(ms);
+    return this->run_round();
+  }
+
+  size_t run_round() {
+    for (TestNode *node : this->nodes_) {
+      node->mesh.loop();
+    }
+
+    size_t transmissions = 0;
+    for (size_t sender = 0; sender < N; ++sender) {
+      auto &packets = this->nodes_[sender]->radio.sent;
+      while (this->delivered_[sender] < packets.size()) {
+        const auto &packet = packets[this->delivered_[sender]++];
+        ++transmissions;
+        for (size_t receiver = 0; receiver < N; ++receiver) {
+          if (this->links_[sender][receiver]) {
+            this->nodes_[receiver]->receive(packet);
+          }
+        }
+      }
+    }
+    return transmissions;
+  }
+
+ private:
+  std::array<TestNode *, N> nodes_;
+  std::array<std::array<bool, N>, N> links_{};
+  std::array<size_t, N> delivered_{};
+};
+
 // ── Wire-format builders (spec §2, §4, §5 of docs/wire-format.md) ──────────
 
 constexpr size_t HDR = 28;

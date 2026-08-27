@@ -131,8 +131,9 @@ struct RouteEntry {
   bool is_gateway : 1;
   bool is_valid : 1;
   bool gateway_update_pending : 1;
+  bool hold_down : 1;
 
-  RouteEntry() : is_gateway(false), is_valid(false), gateway_update_pending(false) {}
+  RouteEntry() : is_gateway(false), is_valid(false), gateway_update_pending(false), hold_down(false) {}
 };
 
 // ───────────────────────────────────────────────────────────────────────────
