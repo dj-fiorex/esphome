@@ -95,6 +95,40 @@ static void test_protocol_v4_derives_fabric_id_and_uses_eight_byte_data_tag() {
   EXPECT_EQ(a.radio.sent[0].size(), HDR + 1 + 2 + 8);
 }
 
+static void test_packet_header_named_fields_have_exact_v4_wire_order() {
+  const esphome::lora_mesh::PacketHeader header{
+      .fabric_id = 0x04030201,
+      .packet_type = esphome::lora_mesh::PacketType::ACK,
+      .flags = 0x06,
+      .src_id = 0x0A090807,
+      .dst_id = 0x0E0D0C0B,
+      .frame_counter = 0x1211100F,
+      .ttl = 0x13,
+      .hop_count = 0x14,
+      .prev_hop = 0x18171615,
+      .next_hop = 0x1C1B1A19,
+  };
+  const std::array<uint8_t, HDR> expected{
+      0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+      0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C,
+  };
+
+  const auto wire_header = esphome::lora_mesh::serialize_packet_header(header);
+  EXPECT_TRUE(std::equal(expected.begin(), expected.end(), wire_header.begin(), wire_header.end()));
+
+  const auto parsed = esphome::lora_mesh::parse_packet_header(expected.data());
+  EXPECT_EQ(parsed.fabric_id, header.fabric_id);
+  EXPECT_EQ(static_cast<uint8_t>(parsed.packet_type), static_cast<uint8_t>(header.packet_type));
+  EXPECT_EQ(parsed.flags, header.flags);
+  EXPECT_EQ(parsed.src_id, header.src_id);
+  EXPECT_EQ(parsed.dst_id, header.dst_id);
+  EXPECT_EQ(parsed.frame_counter, header.frame_counter);
+  EXPECT_EQ(parsed.ttl, header.ttl);
+  EXPECT_EQ(parsed.hop_count, header.hop_count);
+  EXPECT_EQ(parsed.prev_hop, header.prev_hop);
+  EXPECT_EQ(parsed.next_hop, header.next_hop);
+}
+
 // ── Slice 1: protocol-v4 header on transmitted DATA ─────────────────────────
 
 static void test_broadcast_data_has_v4_header() {
@@ -491,7 +525,8 @@ static void test_designated_next_hop_forwards_and_rewrites_header() {
   b.radio.sent.clear();
 
   // A → C unicast, with B as the designated next hop.
-  b.receive(make_data(FABRIC, NODE_A, NODE_C, NODE_B, "water me", 7, 8, 0, NODE_A));
+  const auto original = make_data(FABRIC, NODE_A, NODE_C, NODE_B, "water me", 7, 8, 0, NODE_A);
+  b.receive(original);
   b.mesh.loop();
 
   EXPECT_EQ(b.received.size(), 0u);  // not for B, no delivery
@@ -504,6 +539,8 @@ static void test_designated_next_hop_forwards_and_rewrites_header() {
   EXPECT_EQ(fwd[19], 1);                    // hop_count incremented
   EXPECT_EQ(get_u32_le(&fwd[20]), NODE_B);  // prev_hop rewritten to us
   EXPECT_EQ(get_u32_le(&fwd[24]), NODE_C);  // next_hop = next hop toward C
+  EXPECT_TRUE(std::equal(original.begin(), original.begin() + esphome::lora_mesh::MESH_OFF_TTL, fwd.begin()));
+  EXPECT_TRUE(std::equal(original.begin() + HDR, original.end(), fwd.begin() + HDR));
 }
 
 static void test_non_next_hop_relay_does_not_forward_unicast() {
@@ -1683,6 +1720,7 @@ static void test_reboot_at_frame_counter_exhaustion_refuses_all_data_sends() {
 
 int main() {
   RUN_TEST(test_protocol_v4_derives_fabric_id_and_uses_eight_byte_data_tag);
+  RUN_TEST(test_packet_header_named_fields_have_exact_v4_wire_order);
   RUN_TEST(test_broadcast_data_has_v4_header);
   RUN_TEST(test_data_marks_origin_upstream_state);
   RUN_TEST(test_oversize_payload_truncated_consistently);

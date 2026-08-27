@@ -71,6 +71,20 @@ enum class PacketType : uint8_t {
   ERROR = 6,          // Route error / unreachable
 };
 
+/** Named representation of the fixed protocol-v4 wire header. */
+struct PacketHeader {
+  uint32_t fabric_id{0};
+  PacketType packet_type{PacketType::HELLO};
+  uint8_t flags{0};
+  uint32_t src_id{0};
+  uint32_t dst_id{0};
+  uint32_t frame_counter{0};
+  uint8_t ttl{0};
+  uint8_t hop_count{0};
+  uint32_t prev_hop{0};
+  uint32_t next_hop{0};
+};
+
 // ───────────────────────────────────────────────────────────────────────────
 // Flags bitfield (byte 5)
 // ───────────────────────────────────────────────────────────────────────────
@@ -209,6 +223,44 @@ inline void put_u32_le(uint8_t *buf, uint32_t v) {
 inline uint32_t get_u32_le(const uint8_t *buf) {
   return static_cast<uint32_t>(buf[0]) | (static_cast<uint32_t>(buf[1]) << 8) | (static_cast<uint32_t>(buf[2]) << 16) |
          (static_cast<uint32_t>(buf[3]) << 24);
+}
+
+inline Packet serialize_packet_header(const PacketHeader &header) {
+  uint8_t wire_header[MESH_HEADER_SIZE]{};
+  put_u32_le(wire_header + MESH_OFF_FABRIC_ID, header.fabric_id);
+  wire_header[MESH_OFF_PKT_TYPE] = static_cast<uint8_t>(header.packet_type);
+  wire_header[MESH_OFF_FLAGS] = header.flags;
+  put_u32_le(wire_header + MESH_OFF_SRC_ID, header.src_id);
+  put_u32_le(wire_header + MESH_OFF_DST_ID, header.dst_id);
+  put_u32_le(wire_header + MESH_OFF_FRAME_COUNTER, header.frame_counter);
+  wire_header[MESH_OFF_TTL] = header.ttl;
+  wire_header[MESH_OFF_HOP_COUNT] = header.hop_count;
+  put_u32_le(wire_header + MESH_OFF_PREV_HOP, header.prev_hop);
+  put_u32_le(wire_header + MESH_OFF_NEXT_HOP, header.next_hop);
+  return Packet(wire_header, wire_header + MESH_HEADER_SIZE);
+}
+
+inline PacketHeader parse_packet_header(const uint8_t *wire_header) {
+  return {
+      .fabric_id = get_u32_le(wire_header + MESH_OFF_FABRIC_ID),
+      .packet_type = static_cast<PacketType>(wire_header[MESH_OFF_PKT_TYPE]),
+      .flags = wire_header[MESH_OFF_FLAGS],
+      .src_id = get_u32_le(wire_header + MESH_OFF_SRC_ID),
+      .dst_id = get_u32_le(wire_header + MESH_OFF_DST_ID),
+      .frame_counter = get_u32_le(wire_header + MESH_OFF_FRAME_COUNTER),
+      .ttl = wire_header[MESH_OFF_TTL],
+      .hop_count = wire_header[MESH_OFF_HOP_COUNT],
+      .prev_hop = get_u32_le(wire_header + MESH_OFF_PREV_HOP),
+      .next_hop = get_u32_le(wire_header + MESH_OFF_NEXT_HOP),
+  };
+}
+
+/** Rewrite only the per-hop fields excluded from DATA authentication. */
+inline void write_mutable_packet_header_fields(uint8_t *wire_header, const PacketHeader &header) {
+  wire_header[MESH_OFF_TTL] = header.ttl;
+  wire_header[MESH_OFF_HOP_COUNT] = header.hop_count;
+  put_u32_le(wire_header + MESH_OFF_PREV_HOP, header.prev_hop);
+  put_u32_le(wire_header + MESH_OFF_NEXT_HOP, header.next_hop);
 }
 
 }  // namespace esphome::lora_mesh

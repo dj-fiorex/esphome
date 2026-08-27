@@ -340,24 +340,16 @@ void LoraMesh::on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, f
     ESP_LOGW(TAG, "Packet too short (%zu bytes), dropped", pkt_len);
     return;
   }
-  const uint8_t *h = pkt;
+  const std::span<const uint8_t> packet(pkt, pkt_len);
+  const PacketHeader header = parse_packet_header(packet.data());
 
   // Fabric ID filter (Forwarding gate).
-  uint32_t fabric_id = get_u32_le(h + MESH_OFF_FABRIC_ID);
-  if (fabric_id != this->fabric_id_) {
-    ESP_LOGV(TAG, "Fabric ID mismatch (0x%08" PRIX32 " vs 0x%08" PRIX32 "), dropped", fabric_id, this->fabric_id_);
+  if (header.fabric_id != this->fabric_id_) {
+    ESP_LOGV(TAG, "Fabric ID mismatch (0x%08" PRIX32 " vs 0x%08" PRIX32 "), dropped", header.fabric_id,
+             this->fabric_id_);
     return;
   }
 
-  auto pkt_type = static_cast<PacketType>(h[MESH_OFF_PKT_TYPE]);
-  uint8_t flags = h[MESH_OFF_FLAGS];
-  uint32_t src_id = get_u32_le(h + MESH_OFF_SRC_ID);
-  uint32_t dst_id = get_u32_le(h + MESH_OFF_DST_ID);
-  uint32_t frame_counter = get_u32_le(h + MESH_OFF_FRAME_COUNTER);
-  uint8_t ttl = h[MESH_OFF_TTL];
-  uint8_t hop_count = h[MESH_OFF_HOP_COUNT];
-  uint32_t prev_hop = get_u32_le(h + MESH_OFF_PREV_HOP);
-  uint32_t next_hop = get_u32_le(h + MESH_OFF_NEXT_HOP);
   uint8_t plaintext[MESH_MAX_DATA_PAYLOAD_SIZE];
   uint8_t payload_len = 0;
 
@@ -365,87 +357,84 @@ void LoraMesh::on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, f
   // Link simulator: pretend this packet was never received because its
   // immediate sender is "out of range". Dropped before duplicate/seen handling
   // so the blocked neighbour leaves no trace at all. See ADR-0004.
-  if (this->is_link_blocked_(prev_hop)) {
-    ESP_LOGD(TAG, "link-sim: dropped packet from prev_hop 0x%08" PRIX32 " (blocked)", prev_hop);
+  if (this->is_link_blocked_(header.prev_hop)) {
+    ESP_LOGD(TAG, "link-sim: dropped packet from prev_hop 0x%08" PRIX32 " (blocked)", header.prev_hop);
     return;
   }
 #endif
 
   // Ignore our own transmissions echoed back.
-  if (src_id == this->node_id_) {
+  if (header.src_id == this->node_id_) {
     return;
   }
 
   // Reject unsupported or malformed packet types before duplicate suppression.
   // In particular, changing an authenticated HELLO's type byte must not let the
   // forged frame reserve its source/counter pair in the Seen-cache.
-  switch (pkt_type) {
+  switch (header.packet_type) {
     case PacketType::HELLO:
-      if (!this->validate_hello_packet_(pkt, pkt_len)) {
-        ESP_LOGD(TAG, "HELLO from 0x%08" PRIX32 " failed validation or authentication", src_id);
+      if (!this->validate_hello_packet_(header, packet)) {
+        ESP_LOGD(TAG, "HELLO from 0x%08" PRIX32 " failed validation or authentication", header.src_id);
         return;
       }
       break;
     case PacketType::DATA:
-      if (!this->validate_data_envelope_(pkt, pkt_len, dst_id, flags)) {
+      if (!this->validate_data_envelope_(header, packet)) {
         return;
       }
-      payload_len = pkt[MESH_HEADER_SIZE];
-      if (!mesh_decrypt_payload(this->fabric_key_.data(), src_id, dst_id, frame_counter,
-                                static_cast<uint8_t>(PacketType::DATA), flags, payload_len, pkt + MESH_HEADER_SIZE + 1,
-                                plaintext, pkt + MESH_HEADER_SIZE + 1 + payload_len)) {
-        ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " authentication failed, dropped", src_id);
+      payload_len = packet[MESH_HEADER_SIZE];
+      if (!mesh_decrypt_payload(this->fabric_key_.data(), header.src_id, header.dst_id, header.frame_counter,
+                                static_cast<uint8_t>(header.packet_type), header.flags, payload_len,
+                                packet.data() + MESH_HEADER_SIZE + 1, plaintext,
+                                packet.data() + MESH_HEADER_SIZE + 1 + payload_len)) {
+        ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " authentication failed, dropped", header.src_id);
         return;
       }
       break;
     default:
-      ESP_LOGD(TAG, "Unhandled packet type %u from 0x%08" PRIX32, static_cast<uint8_t>(pkt_type), src_id);
+      ESP_LOGD(TAG, "Unhandled packet type %u from 0x%08" PRIX32, static_cast<uint8_t>(header.packet_type),
+               header.src_id);
       return;
   }
 
   // Duplicate suppression.
-  if (this->is_duplicate_(src_id, frame_counter)) {
-    ESP_LOGV(TAG, "Duplicate from 0x%08" PRIX32 " frame=%" PRIu32 ", dropped", src_id, frame_counter);
+  if (this->is_duplicate_(header.src_id, header.frame_counter)) {
+    ESP_LOGV(TAG, "Duplicate from 0x%08" PRIX32 " frame=%" PRIu32 ", dropped", header.src_id, header.frame_counter);
     return;
   }
-  this->mark_seen_(src_id, frame_counter);
+  this->mark_seen_(header.src_id, header.frame_counter);
 
-  bool src_is_gw = (flags & FLAG_IS_GATEWAY) != 0;
-
-  switch (pkt_type) {
+  switch (header.packet_type) {
     case PacketType::HELLO:
-      this->process_hello_(pkt, pkt_len, MESH_HEADER_SIZE, src_id, src_is_gw, prev_hop, rssi, snr);
+      this->process_hello_(header, packet, rssi, snr);
       break;
     case PacketType::DATA:
-      this->process_data_(pkt, pkt_len, plaintext, payload_len, src_id, dst_id, frame_counter, ttl, hop_count, prev_hop,
-                          next_hop, flags, rssi, snr);
+      this->process_data_(header, packet, {plaintext, payload_len}, rssi, snr);
       break;
     default:
-      ESP_LOGD(TAG, "Unhandled packet type %u from 0x%08" PRIX32, static_cast<uint8_t>(pkt_type), src_id);
+      ESP_LOGD(TAG, "Unhandled packet type %u from 0x%08" PRIX32, static_cast<uint8_t>(header.packet_type),
+               header.src_id);
       break;
   }
 }
 
 // ─── HELLO processing ─────────────────────────────────────────────────────────
 
-bool LoraMesh::validate_hello_packet_(const uint8_t *pkt, size_t pkt_len) const {
+bool LoraMesh::validate_hello_packet_(const PacketHeader &header, std::span<const uint8_t> packet) const {
   constexpr size_t minimum_size = MESH_HEADER_SIZE + 3 + HELLO_AUTH_TAG_SIZE;
-  if (pkt_len < minimum_size) {
+  if (packet.size() < minimum_size) {
     return false;
   }
-  size_t authenticated_size = pkt_len - HELLO_AUTH_TAG_SIZE;
+  size_t authenticated_size = packet.size() - HELLO_AUTH_TAG_SIZE;
   size_t offset = MESH_HEADER_SIZE;
-  if (pkt[offset] != MESH_PROTO_VERSION) {
+  if (packet[offset] != MESH_PROTO_VERSION) {
     return false;
   }
-  uint8_t flags = pkt[MESH_OFF_FLAGS];
-  uint32_t src_id = get_u32_le(pkt + MESH_OFF_SRC_ID);
-  if ((flags & ~FLAG_IS_GATEWAY) != 0 || get_u32_le(pkt + MESH_OFF_DST_ID) != MESH_BROADCAST_ID ||
-      pkt[MESH_OFF_TTL] == 0 || pkt[MESH_OFF_HOP_COUNT] != 0 || get_u32_le(pkt + MESH_OFF_PREV_HOP) != src_id ||
-      get_u32_le(pkt + MESH_OFF_NEXT_HOP) != MESH_BROADCAST_ID) {
+  if ((header.flags & ~FLAG_IS_GATEWAY) != 0 || header.dst_id != MESH_BROADCAST_ID || header.ttl == 0 ||
+      header.hop_count != 0 || header.prev_hop != header.src_id || header.next_hop != MESH_BROADCAST_ID) {
     return false;
   }
-  uint8_t name_len = pkt[offset + 1];
+  uint8_t name_len = packet[offset + 1];
   if (name_len > MESH_NODE_NAME_MAX_LEN) {
     return false;
   }
@@ -453,76 +442,77 @@ bool LoraMesh::validate_hello_packet_(const uint8_t *pkt, size_t pkt_len) const 
   if (route_count_offset >= authenticated_size) {
     return false;
   }
-  uint8_t route_count = pkt[route_count_offset];
+  uint8_t route_count = packet[route_count_offset];
   size_t expected_size = route_count_offset + 1 + static_cast<size_t>(route_count) * ROUTE_ADV_SIZE;
   if (expected_size != authenticated_size) {
     return false;
   }
   for (size_t pos = route_count_offset + 1; pos < authenticated_size; pos += ROUTE_ADV_SIZE) {
-    uint32_t advertised_destination = get_u32_le(pkt + pos + ROUTE_ADV_OFF_DEST_ID);
-    uint8_t advertised_hops = pkt[pos + ROUTE_ADV_OFF_HOP_COUNT];
-    uint8_t route_flags = pkt[pos + ROUTE_ADV_OFF_FLAGS];
-    if (advertised_destination == MESH_BROADCAST_ID || advertised_destination == src_id ||
+    uint32_t advertised_destination = get_u32_le(packet.data() + pos + ROUTE_ADV_OFF_DEST_ID);
+    uint8_t advertised_hops = packet[pos + ROUTE_ADV_OFF_HOP_COUNT];
+    uint8_t route_flags = packet[pos + ROUTE_ADV_OFF_FLAGS];
+    if (advertised_destination == MESH_BROADCAST_ID || advertised_destination == header.src_id ||
         advertised_hops < MESH_MIN_ADVERTISED_HOPS || advertised_hops > MESH_MAX_ADVERTISED_HOPS ||
         (route_flags & ~ROUTE_FLAG_IS_GATEWAY) != 0) {
       return false;
     }
   }
-  return verify_hello_auth_tag(this->control_plane_key_.data(), pkt, authenticated_size, pkt + authenticated_size);
+  return verify_hello_auth_tag(this->control_plane_key_.data(), packet.data(), authenticated_size,
+                               packet.data() + authenticated_size);
 }
 
-bool LoraMesh::validate_data_envelope_(const uint8_t *pkt, size_t pkt_len, uint32_t dst_id, uint8_t flags) const {
-  if (pkt_len < MESH_HEADER_SIZE + 1) {
+bool LoraMesh::validate_data_envelope_(const PacketHeader &header, std::span<const uint8_t> packet) const {
+  if (packet.size() < MESH_HEADER_SIZE + 1) {
     return false;
   }
-  uint8_t payload_len = pkt[MESH_HEADER_SIZE];
+  uint8_t payload_len = packet[MESH_HEADER_SIZE];
   size_t expected_size = MESH_HEADER_SIZE + 1 + payload_len + DATA_AUTH_TAG_SIZE;
-  if (payload_len > MESH_MAX_DATA_PAYLOAD_SIZE || pkt_len != expected_size) {
+  if (payload_len > MESH_MAX_DATA_PAYLOAD_SIZE || packet.size() != expected_size) {
     return false;
   }
-  bool is_broadcast = dst_id == MESH_BROADCAST_ID;
-  return is_broadcast == ((flags & FLAG_IS_BROADCAST) != 0);
+  bool is_broadcast = header.dst_id == MESH_BROADCAST_ID;
+  return is_broadcast == ((header.flags & FLAG_IS_BROADCAST) != 0);
 }
 
-void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset, uint32_t src_id, bool src_is_gateway,
-                              uint32_t prev_hop, float rssi, float snr) {
-  if (pkt_len < offset + HELLO_FIXED_SIZE) {
+void LoraMesh::process_hello_(const PacketHeader &header, std::span<const uint8_t> packet, float rssi, float snr) {
+  constexpr size_t offset = MESH_HEADER_SIZE;
+  if (packet.size() < offset + HELLO_FIXED_SIZE) {
     return;
   }
 
   // Reject packets from nodes running a different protocol version.
-  if (pkt[offset] != MESH_PROTO_VERSION) {
-    ESP_LOGD(TAG, "HELLO from 0x%08" PRIX32 ": proto version %u (expected %u), skipping body", src_id, pkt[offset],
-             MESH_PROTO_VERSION);
+  if (packet[offset] != MESH_PROTO_VERSION) {
+    ESP_LOGD(TAG, "HELLO from 0x%08" PRIX32 ": proto version %u (expected %u), skipping body", header.src_id,
+             packet[offset], MESH_PROTO_VERSION);
     return;
   }
 
   // A packet from another protocol version must not change mesh state.
-  this->clear_route_hold_down_(src_id);
-  this->update_route_(src_id, src_id, 1, src_is_gateway, rssi, snr);
+  this->clear_route_hold_down_(header.src_id);
+  this->update_route_(header.src_id, header.src_id, 1, (header.flags & FLAG_IS_GATEWAY) != 0, rssi, snr);
 
-  uint8_t name_len = pkt[offset + 1];
+  uint8_t name_len = packet[offset + 1];
 
   // Ensure the packet contains name bytes and the route_count byte.
-  if (pkt_len < offset + 2 + static_cast<size_t>(name_len) + 1) {
+  if (packet.size() < offset + 2 + static_cast<size_t>(name_len) + 1) {
     return;
   }
 
   if (name_len > 0) {
-    this->store_node_name_(src_id, reinterpret_cast<const char *>(pkt + offset + 2), name_len);
+    this->store_node_name_(header.src_id, reinterpret_cast<const char *>(packet.data() + offset + 2), name_len);
   }
 
-  uint8_t route_count = pkt[offset + 2 + name_len];
+  uint8_t route_count = packet[offset + 2 + name_len];
   size_t pos = offset + 3 + name_len;
-  size_t authenticated_size = pkt_len - HELLO_AUTH_TAG_SIZE;
+  size_t authenticated_size = packet.size() - HELLO_AUTH_TAG_SIZE;
 
   for (uint8_t i = 0; i < route_count && pos + ROUTE_ADV_SIZE <= authenticated_size; ++i, pos += ROUTE_ADV_SIZE) {
-    uint32_t adv_dst = get_u32_le(pkt + pos + ROUTE_ADV_OFF_DEST_ID);
-    uint8_t adv_hops = pkt[pos + ROUTE_ADV_OFF_HOP_COUNT];
-    float advertised_rssi = static_cast<float>(static_cast<int8_t>(pkt[pos + ROUTE_ADV_OFF_PATH_RSSI]));
-    bool advertised_gateway = (pkt[pos + ROUTE_ADV_OFF_FLAGS] & ROUTE_FLAG_IS_GATEWAY) != 0;
+    uint32_t adv_dst = get_u32_le(packet.data() + pos + ROUTE_ADV_OFF_DEST_ID);
+    uint8_t adv_hops = packet[pos + ROUTE_ADV_OFF_HOP_COUNT];
+    float advertised_rssi = static_cast<float>(static_cast<int8_t>(packet[pos + ROUTE_ADV_OFF_PATH_RSSI]));
+    bool advertised_gateway = (packet[pos + ROUTE_ADV_OFF_FLAGS] & ROUTE_FLAG_IS_GATEWAY) != 0;
 
-    if (adv_dst == this->node_id_ || adv_dst == src_id) {
+    if (adv_dst == this->node_id_ || adv_dst == header.src_id) {
       continue;
     }
     uint16_t new_hops = static_cast<uint16_t>(adv_hops) + 1;
@@ -539,9 +529,9 @@ void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset,
     // otherwise stable multi-hop routes expire and flap every route_ttl.
     bool better = existing == nullptr || new_hops < existing->hop_count ||
                   (new_hops == existing->hop_count && path_rssi > existing->rssi);
-    bool reconfirmed = existing != nullptr && existing->next_hop_id == src_id && new_hops == existing->hop_count;
+    bool reconfirmed = existing != nullptr && existing->next_hop_id == header.src_id && new_hops == existing->hop_count;
     if (better || reconfirmed) {
-      this->update_route_(adv_dst, src_id, static_cast<uint8_t>(new_hops), advertised_gateway, path_rssi, snr);
+      this->update_route_(adv_dst, header.src_id, static_cast<uint8_t>(new_hops), advertised_gateway, path_rssi, snr);
     } else if (existing != nullptr && this->update_gateway_state_(existing, advertised_gateway)) {
       // Gateway eligibility belongs to the destination, not to one path. A
       // promotion or Withdrawal arriving over a worse Route must propagate
@@ -550,70 +540,70 @@ void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset,
     }
   }
 
-  const char *src_name = this->lookup_node_name_(src_id);
-  ESP_LOGD(TAG, "HELLO from 0x%08" PRIX32 " name=%s rssi=%.0f snr=%.1f gw=%s routes=%u", src_id,
+  const char *src_name = this->lookup_node_name_(header.src_id);
+  ESP_LOGD(TAG, "HELLO from 0x%08" PRIX32 " name=%s rssi=%.0f snr=%.1f gw=%s routes=%u", header.src_id,
            src_name != nullptr ? src_name : "?", static_cast<double>(rssi), static_cast<double>(snr),
-           src_is_gateway ? "yes" : "no", route_count);
+           (header.flags & FLAG_IS_GATEWAY) != 0 ? "yes" : "no", route_count);
 }
 
 // ─── DATA processing ──────────────────────────────────────────────────────────
 
-void LoraMesh::process_data_(const uint8_t *pkt, size_t pkt_len, const uint8_t *plaintext, uint8_t payload_len,
-                             uint32_t src_id, uint32_t dst_id, uint32_t frame_counter, uint8_t ttl, uint8_t hop_count,
-                             uint32_t prev_hop, uint32_t next_hop, uint8_t flags, float rssi, float snr) {
-  bool is_broadcast = dst_id == MESH_BROADCAST_ID;
-  bool is_for_us = is_broadcast || (dst_id == this->node_id_);
+void LoraMesh::process_data_(const PacketHeader &header, std::span<const uint8_t> packet,
+                             std::span<const uint8_t> plaintext, float rssi, float snr) {
+  bool is_broadcast = header.dst_id == MESH_BROADCAST_ID;
+  bool is_for_us = is_broadcast || (header.dst_id == this->node_id_);
 
   if (is_for_us) {
-    ReplayDecision replay_decision = this->admit_replay_counter_(src_id, frame_counter);
+    ReplayDecision replay_decision = this->admit_replay_counter_(header.src_id, header.frame_counter);
     if (replay_decision == ReplayDecision::REPLAY) {
-      ESP_LOGW(TAG, "DATA from 0x%08" PRIX32 " frame=%" PRIu32 " replay rejected", src_id, frame_counter);
+      ESP_LOGW(TAG, "DATA from 0x%08" PRIX32 " frame=%" PRIu32 " replay rejected", header.src_id, header.frame_counter);
       return;
     }
     if (replay_decision == ReplayDecision::TABLE_FULL) {
-      ESP_LOGW(TAG, "Replay table full; DATA from unknown source 0x%08" PRIX32 " rejected fail-safe", src_id);
+      ESP_LOGW(TAG, "Replay table full; DATA from unknown source 0x%08" PRIX32 " rejected fail-safe", header.src_id);
       return;
     }
 
     MeshMessage msg;
-    LoraMesh::id_to_hex(src_id, msg.source);
-    const char *src_name = this->lookup_node_name_(src_id);
+    LoraMesh::id_to_hex(header.src_id, msg.source);
+    const char *src_name = this->lookup_node_name_(header.src_id);
     if (src_name != nullptr) {
       snprintf(msg.source_name, sizeof(msg.source_name), "%s", src_name);
     }
-    LoraMesh::id_to_hex(dst_id, msg.destination);
-    LoraMesh::id_to_hex(prev_hop, msg.prev_hop);
-    msg.payload.assign(plaintext, plaintext + payload_len);
-    msg.frame_counter = frame_counter;
-    msg.hop_count = hop_count;
-    msg.ttl = ttl;
+    LoraMesh::id_to_hex(header.dst_id, msg.destination);
+    LoraMesh::id_to_hex(header.prev_hop, msg.prev_hop);
+    msg.payload.assign(plaintext.begin(), plaintext.end());
+    msg.frame_counter = header.frame_counter;
+    msg.hop_count = header.hop_count;
+    msg.ttl = header.ttl;
     msg.rssi = rssi;
     msg.snr = snr;
     msg.is_broadcast = is_broadcast;
     msg.is_for_this_node = !is_broadcast;
 
-    ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " hops=%u len=%u", src_id, hop_count, payload_len);
+    ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " hops=%u len=%zu", header.src_id, header.hop_count, plaintext.size());
     this->message_callback_(msg);
   }
 
   // Forward if TTL allows, forwarding is enabled, and packet is not unicast-only-to-us.
-  if (!this->forward_messages_ || ttl <= 1 || (is_for_us && !is_broadcast)) {
+  if (!this->forward_messages_ || header.ttl <= 1 || (is_for_us && !is_broadcast)) {
     return;
   }
 
   // Single-path unicast (ADR 0002): only the designated next hop forwards.
   const RouteEntry *route = nullptr;
   if (!is_broadcast) {
-    if (next_hop != this->node_id_) {
+    if (header.next_hop != this->node_id_) {
       return;
     }
-    route = this->find_route_(dst_id);
+    route = this->find_route_(header.dst_id);
     if (route == nullptr) {
-      ESP_LOGW(TAG, "No route to forward 0x%08" PRIX32, dst_id);
+      ESP_LOGW(TAG, "No route to forward 0x%08" PRIX32, header.dst_id);
       return;
     }
-    if (route->next_hop_id == prev_hop) {
-      ESP_LOGW(TAG, "Refusing to forward 0x%08" PRIX32 " back to previous hop 0x%08" PRIX32, dst_id, prev_hop);
+    if (route->next_hop_id == header.prev_hop) {
+      ESP_LOGW(TAG, "Refusing to forward 0x%08" PRIX32 " back to previous hop 0x%08" PRIX32, header.dst_id,
+               header.prev_hop);
       return;
     }
   }
@@ -621,41 +611,28 @@ void LoraMesh::process_data_(const uint8_t *pkt, size_t pkt_len, const uint8_t *
   // Packet forwarding: copy the incoming packet into a stack-allocated Packet,
   // then patch the TTL, hop_count, prev_hop and next_hop fields before retransmitting.
   // The authenticated immutable header fields and encrypted body are Forwarded verbatim.
-  Packet fwd(pkt, pkt + pkt_len);
-  fwd[MESH_OFF_TTL] = ttl - 1;
-  fwd[MESH_OFF_HOP_COUNT] = hop_count + 1;
-  put_u32_le(&fwd[MESH_OFF_PREV_HOP], this->node_id_);
+  Packet fwd(packet.begin(), packet.end());
+  PacketHeader forwarded_header = header;
+  forwarded_header.ttl--;
+  forwarded_header.hop_count++;
+  forwarded_header.prev_hop = this->node_id_;
 
   if (is_broadcast) {
-    put_u32_le(&fwd[MESH_OFF_NEXT_HOP], MESH_BROADCAST_ID);
+    forwarded_header.next_hop = MESH_BROADCAST_ID;
+    write_mutable_packet_header_fields(fwd.data(), forwarded_header);
     this->enqueue_tx_(fwd);
-    ESP_LOGD(TAG, "Forward broadcast queued ttl=%u", ttl - 1);
+    ESP_LOGD(TAG, "Forward broadcast queued ttl=%u", forwarded_header.ttl);
     return;
   }
 
-  put_u32_le(&fwd[MESH_OFF_NEXT_HOP], route->next_hop_id);
+  forwarded_header.next_hop = route->next_hop_id;
+  write_mutable_packet_header_fields(fwd.data(), forwarded_header);
   this->enqueue_tx_(fwd);
-  ESP_LOGD(TAG, "Forward unicast queued to 0x%08" PRIX32 " via 0x%08" PRIX32 " ttl=%u", dst_id, route->next_hop_id,
-           ttl - 1);
+  ESP_LOGD(TAG, "Forward unicast queued to 0x%08" PRIX32 " via 0x%08" PRIX32 " ttl=%u", header.dst_id,
+           route->next_hop_id, forwarded_header.ttl);
 }
 
 // ─── Packet builders ──────────────────────────────────────────────────────────
-
-Packet LoraMesh::build_header_(PacketType type, uint8_t flags, uint32_t dst_id, uint32_t frame_counter, uint8_t ttl,
-                               uint8_t hop_count, uint32_t prev_hop, uint32_t next_hop) const {
-  uint8_t buf[MESH_HEADER_SIZE]{};
-  put_u32_le(buf + MESH_OFF_FABRIC_ID, this->fabric_id_);
-  buf[MESH_OFF_PKT_TYPE] = static_cast<uint8_t>(type);
-  buf[MESH_OFF_FLAGS] = flags;
-  put_u32_le(buf + MESH_OFF_SRC_ID, this->node_id_);
-  put_u32_le(buf + MESH_OFF_DST_ID, dst_id);
-  put_u32_le(buf + MESH_OFF_FRAME_COUNTER, frame_counter);
-  buf[MESH_OFF_TTL] = ttl;
-  buf[MESH_OFF_HOP_COUNT] = hop_count;
-  put_u32_le(buf + MESH_OFF_PREV_HOP, prev_hop);
-  put_u32_le(buf + MESH_OFF_NEXT_HOP, next_hop);
-  return Packet(buf, buf + MESH_HEADER_SIZE);
-}
 
 Packet LoraMesh::build_hello_packet_() {
   uint8_t flags = this->upstream_connected_ ? FLAG_IS_GATEWAY : 0;
@@ -696,8 +673,19 @@ Packet LoraMesh::build_hello_packet_() {
   if (!this->next_frame_counter_(frame_counter)) {
     return {};
   }
-  auto pkt = this->build_header_(PacketType::HELLO, flags, MESH_BROADCAST_ID, frame_counter, this->max_hops_, 0,
-                                 this->node_id_, MESH_BROADCAST_ID);
+  const PacketHeader header{
+      .fabric_id = this->fabric_id_,
+      .packet_type = PacketType::HELLO,
+      .flags = flags,
+      .src_id = this->node_id_,
+      .dst_id = MESH_BROADCAST_ID,
+      .frame_counter = frame_counter,
+      .ttl = this->max_hops_,
+      .hop_count = 0,
+      .prev_hop = this->node_id_,
+      .next_hop = MESH_BROADCAST_ID,
+  };
+  auto pkt = serialize_packet_header(header);
   pkt.push_back(MESH_PROTO_VERSION);
   pkt.push_back(static_cast<uint8_t>(name_len));
   for (size_t i = 0; i < name_len; ++i) {
@@ -735,8 +723,19 @@ Packet LoraMesh::build_data_packet_(uint32_t dst_id, uint32_t next_hop, std::spa
   if (!this->next_frame_counter_(frame_counter)) {
     return {};
   }
-  auto pkt =
-      this->build_header_(PacketType::DATA, flags, dst_id, frame_counter, this->max_hops_, 0, this->node_id_, next_hop);
+  const PacketHeader header{
+      .fabric_id = this->fabric_id_,
+      .packet_type = PacketType::DATA,
+      .flags = flags,
+      .src_id = this->node_id_,
+      .dst_id = dst_id,
+      .frame_counter = frame_counter,
+      .ttl = this->max_hops_,
+      .hop_count = 0,
+      .prev_hop = this->node_id_,
+      .next_hop = next_hop,
+  };
+  auto pkt = serialize_packet_header(header);
   // Budget = radio frame limit minus header, payload_len byte, and authentication tag.
   size_t max_pkt = (this->radio_ != nullptr) ? this->radio_->get_max_packet_size() : LORA_MAX_PACKET_SIZE;
   max_pkt = std::min(max_pkt, LORA_MAX_PACKET_SIZE);
@@ -749,9 +748,9 @@ Packet LoraMesh::build_data_packet_(uint32_t dst_id, uint32_t next_hop, std::spa
 
   uint8_t ciphertext[MESH_MAX_DATA_PAYLOAD_SIZE];
   uint8_t tag[DATA_AUTH_TAG_SIZE];
-  bool encrypted = mesh_encrypt_payload(this->fabric_key_.data(), this->node_id_, dst_id, frame_counter,
-                                        static_cast<uint8_t>(PacketType::DATA), flags, static_cast<uint8_t>(len),
-                                        payload.data(), ciphertext, tag);
+  bool encrypted = mesh_encrypt_payload(this->fabric_key_.data(), header.src_id, header.dst_id, header.frame_counter,
+                                        static_cast<uint8_t>(header.packet_type), header.flags,
+                                        static_cast<uint8_t>(len), payload.data(), ciphertext, tag);
   if (!encrypted) {
     ESP_LOGE(TAG, "Failed to encrypt DATA packet");
     return {};

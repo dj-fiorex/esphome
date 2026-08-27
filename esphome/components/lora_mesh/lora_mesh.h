@@ -134,12 +134,10 @@ class LoraMesh : public Component {
 
  protected:
   // ── Packet building ────────────────────────────────────────────────────
-  Packet build_header_(PacketType type, uint8_t flags, uint32_t dst_id, uint32_t frame_counter, uint8_t ttl,
-                       uint8_t hop_count, uint32_t prev_hop, uint32_t next_hop) const;
   Packet build_hello_packet_();
   Packet build_data_packet_(uint32_t dst_id, uint32_t next_hop, std::span<const uint8_t> payload);
-  bool validate_hello_packet_(const uint8_t *pkt, size_t pkt_len) const;
-  bool validate_data_envelope_(const uint8_t *pkt, size_t pkt_len, uint32_t dst_id, uint8_t flags) const;
+  bool validate_hello_packet_(const PacketHeader &header, std::span<const uint8_t> packet) const;
+  bool validate_data_envelope_(const PacketHeader &header, std::span<const uint8_t> packet) const;
 
   // ── Outgoing TX queue (issue #12) ─────────────────────────────────────
   // All outbound packets are enqueued here and drained at most one per
@@ -155,11 +153,9 @@ class LoraMesh : public Component {
   bool has_pending_gateway_updates_() const;
 
   // ── Packet processing ──────────────────────────────────────────────────
-  void process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset, uint32_t src_id, bool src_is_gateway,
-                      uint32_t prev_hop, float rssi, float snr);
-  void process_data_(const uint8_t *pkt, size_t pkt_len, const uint8_t *plaintext, uint8_t payload_len, uint32_t src_id,
-                     uint32_t dst_id, uint32_t frame_counter, uint8_t ttl, uint8_t hop_count, uint32_t prev_hop,
-                     uint32_t next_hop, uint8_t flags, float rssi, float snr);
+  void process_hello_(const PacketHeader &header, std::span<const uint8_t> packet, float rssi, float snr);
+  void process_data_(const PacketHeader &header, std::span<const uint8_t> packet, std::span<const uint8_t> plaintext,
+                     float rssi, float snr);
 
   // ── Routing helpers ────────────────────────────────────────────────────
   RouteEntry *find_route_(uint32_t dst_id);
