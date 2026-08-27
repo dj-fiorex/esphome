@@ -148,6 +148,7 @@ class LoraMesh : public Component {
   static void queued_hello_attempted_(void *context, const Packet &hello);
 
   // ── Packet processing ──────────────────────────────────────────────────
+  void log_admission_failure_(AdmissionFailure failure, const PacketHeader &header, size_t packet_size) const;
   void process_hello_(const PacketHeader &header, std::span<const uint8_t> packet, float rssi, float snr);
   void process_data_(const PacketHeader &header, std::span<const uint8_t> packet, std::span<const uint8_t> plaintext,
                      float rssi, float snr);
