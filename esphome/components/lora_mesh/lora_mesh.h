@@ -7,6 +7,8 @@
 #include "lora_mesh_crypto.h"
 #include "lora_packet.h"
 #include "lora_radio.h"
+#include "outbound_airtime.h"
+#include "packet_admission.h"
 #include "route_table.h"
 
 #ifdef USE_SENSOR
@@ -30,9 +32,6 @@ namespace esphome::lora_mesh {
 // These fallback values are only used for IDE/static-analysis builds.
 #ifndef LORA_MESH_SEEN_CACHE_SIZE
 #define LORA_MESH_SEEN_CACHE_SIZE 32  // NOLINT(cppcoreguidelines-macro-usage)
-#endif
-#ifndef LORA_MESH_TX_QUEUE_SIZE
-#define LORA_MESH_TX_QUEUE_SIZE 8  // NOLINT(cppcoreguidelines-macro-usage)
 #endif
 
 class LoraMesh : public Component {
@@ -62,7 +61,7 @@ class LoraMesh : public Component {
   void set_route_ttl(uint32_t ms) { this->routing_table_.set_route_ttl(ms); }
   void set_seen_cache_ttl(uint32_t ms) { this->seen_cache_ttl_ms_ = ms; }
   void set_forward_messages(bool forward) { this->forward_messages_ = forward; }
-  void set_tx_jitter(uint32_t ms) { this->tx_jitter_ms_ = ms; }
+  void set_tx_jitter(uint32_t ms) { this->outbound_airtime_.set_jitter(ms); }
 
   // ── Public API (callable from C++ lambdas / actions) ─────────────────
   bool send_message(const std::string &destination, std::span<const uint8_t> payload);
@@ -134,8 +133,6 @@ class LoraMesh : public Component {
   // ── Packet building ────────────────────────────────────────────────────
   Packet build_hello_packet_();
   Packet build_data_packet_(uint32_t dst_id, uint32_t next_hop, std::span<const uint8_t> payload);
-  bool validate_hello_packet_(const PacketHeader &header, std::span<const uint8_t> packet) const;
-  bool validate_data_envelope_(const PacketHeader &header, std::span<const uint8_t> packet) const;
 
   // ── Outgoing TX queue (issue #12) ─────────────────────────────────────
   // All outbound packets are enqueued here and drained at most one per
@@ -143,12 +140,12 @@ class LoraMesh : public Component {
   // loop stall to one packet's airtime and the pre-send jitter is a
   // poor-man's CSMA against simultaneous Forwarding Nodes. Each packet is
   // attempted once; radio failures are logged and dropped without retry.
-  bool enqueue_tx_(const Packet &pkt);
-  void drain_tx_queue_(uint32_t now);
   void schedule_hello_update_();
   void queue_pending_hello_(uint32_t now);
   void acknowledge_advertised_gateway_updates_(const Packet &hello);
   bool has_pending_gateway_updates_() const;
+  static Packet refresh_queued_hello_(void *context);
+  static void queued_hello_attempted_(void *context, const Packet &hello);
 
   // ── Packet processing ──────────────────────────────────────────────────
   void process_hello_(const PacketHeader &header, std::span<const uint8_t> packet, float rssi, float snr);
@@ -199,6 +196,7 @@ class LoraMesh : public Component {
   std::array<uint8_t, FABRIC_KEY_SIZE> fabric_key_{};
   std::array<uint8_t, CONTROL_PLANE_KEY_SIZE> control_plane_key_{};
   bool fabric_key_valid_{false};
+  PacketAdmission packet_admission_;
 
   // Replay high-water state is safety-critical: only admit_replay_counter_()
   // may mutate it so accepted sources can never be evicted under pressure.
@@ -219,8 +217,6 @@ class LoraMesh : public Component {
   bool upstream_connected_{false};
   bool setup_complete_{false};
   bool hello_update_pending_{false};
-  enum class QueuedHelloState : uint8_t { NONE, CURRENT, STALE };
-  QueuedHelloState queued_hello_state_{QueuedHelloState::NONE};
   uint8_t max_hops_{8};
   uint32_t discovery_interval_ms_{30000};
   uint32_t seen_cache_ttl_ms_{120000};
@@ -254,13 +250,7 @@ class LoraMesh : public Component {
   // Node name cache — same capacity as the routing table, zero heap allocation.
   std::array<NameEntry, LORA_MESH_MAX_ROUTES> name_map_{};
 
-  // Outgoing TX ring buffer — fixed capacity, zero heap allocation.
-  std::array<Packet, LORA_MESH_TX_QUEUE_SIZE> tx_queue_{};
-  size_t tx_queue_head_{0};
-  size_t tx_queue_count_{0};
-  uint32_t tx_jitter_ms_{100};    // upper bound for the random pre-send backoff
-  uint32_t tx_next_tx_at_{0};     // millis() deadline of the armed backoff
-  bool tx_backoff_armed_{false};  // backoff sampled for the current head packet
+  OutboundAirtime outbound_airtime_;
 
   // ── Callbacks ──────────────────────────────────────────────────────────
   // message_callback_ is likely always registered; use CallbackManager.

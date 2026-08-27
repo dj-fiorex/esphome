@@ -62,7 +62,7 @@ class RouteTable {
   void acknowledge_gateway_update(uint32_t destination_id);
   bool has_pending_gateway_updates() const;
 
- protected:
+ private:
   RouteEntry *find_(uint32_t destination_id);
   RouteEntry *allocate_(uint32_t now);
   RouteUpdate update_(const RouteCandidate &candidate, uint32_t now);
