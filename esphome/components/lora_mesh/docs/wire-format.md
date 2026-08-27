@@ -24,18 +24,22 @@ and has no independent security role.
 |-------:|-----:|-------|-------|
 | 0 | 4 | `fabric_id` | Public ID derived from the Fabric Key. Mismatch means drop. |
 | 4 | 1 | `pkt_type` | `1`=HELLO, `2`=DATA; remaining values are reserved. |
-| 5 | 1 | `flags` | `0x01` sender has Upstream Connectivity, `0x02` broadcast, `0x04` ACK requested, `0x08` forwarded. |
+| 5 | 1 | `flags` | `0x01` origin had Upstream Connectivity at send time; `0x02` DATA destination is broadcast. `0x04` through `0x80` are reserved. |
 | 6 | 4 | `src_id` | Origin Node; immutable end to end and included in DATA AAD. |
 | 10 | 4 | `dst_id` | Final destination or `0xFFFFFFFF` broadcast; included in DATA AAD. |
 | 14 | 4 | `frame_counter` | Persistent sender counter; included in the DATA nonce and AAD. |
 | 18 | 1 | `ttl` | Remaining hops; decremented by a Forwarding Node. |
-| 19 | 1 | `hop_count` | Traversed hops; incremented by a Forwarding Node. |
+| 19 | 1 | `hop_count` | The number of Forwarding Nodes already traversed; the origin sets zero and each Forwarding Node increments it. |
 | 20 | 4 | `prev_hop` | Link sender; rewritten on each Forward. |
 | 24 | 4 | `next_hop` | Intended Forwarding Node; `0xFFFFFFFF` for broadcast. |
 
 The mutable routing fields are not in DATA AAD. Flags, `src_id`, `dst_id`, `frame_counter`, packet type, and payload
 length are authenticated end to end for DATA. Every header byte is authenticated for HELLO because HELLO is never
 Forwarded.
+
+A directly delivered DATA packet therefore arrives with `hop_count=0`; DATA sent over A → B → C arrives at C
+with `hop_count=1` because B is the sole Forwarding Node. Forwarding preserves the authenticated flags byte; there is
+no forwarded flag in protocol version 4.
 
 ## DATA body
 

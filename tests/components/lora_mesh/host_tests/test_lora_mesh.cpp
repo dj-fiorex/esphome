@@ -104,6 +104,18 @@ static void test_broadcast_data_has_v4_header() {
   static_assert(esphome::lora_mesh::MESH_HEADER_SIZE == 28, "header must be 28 bytes");
 }
 
+static void test_data_marks_origin_upstream_state() {
+  TestNode gateway("node-a");
+  gateway.mesh.set_upstream_connected(true);
+
+  EXPECT_TRUE(gateway.mesh.broadcast_message("hi"));
+  gateway.mesh.loop();
+
+  EXPECT_EQ(gateway.radio.sent.size(), 1u);
+  EXPECT_TRUE(gateway.radio.sent[0][5] & FLAG_GATEWAY);
+  EXPECT_TRUE(gateway.radio.sent[0][5] & FLAG_BROADCAST);
+}
+
 static void test_oversize_payload_truncated_consistently() {
   TestNode a("node-a");
   // 250 bytes does not fit: 255 radio limit - 28 header - 1 len byte - 8 tag bytes = 218 max.
@@ -1143,6 +1155,7 @@ static void test_frame_counter_persists_across_reboot() {
 int main() {
   RUN_TEST(test_protocol_v4_derives_fabric_id_and_uses_eight_byte_data_tag);
   RUN_TEST(test_broadcast_data_has_v4_header);
+  RUN_TEST(test_data_marks_origin_upstream_state);
   RUN_TEST(test_oversize_payload_truncated_consistently);
   RUN_TEST(test_own_hello_has_v4_body_at_offset_28);
   RUN_TEST(test_hello_builds_direct_and_advertised_routes);

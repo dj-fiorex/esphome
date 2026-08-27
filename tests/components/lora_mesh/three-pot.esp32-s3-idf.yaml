@@ -1,0 +1,12 @@
+# Runnable three-pot hardware scenario. Copy secrets.example.yaml to the
+# gitignored secrets.yaml before validating, compiling, or flashing.
+
+packages:
+  scenario: !include test-three-pot.esp32-s3-idf.yaml
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+lora_mesh:
+  fabric_key: !secret lora_mesh_fabric_key

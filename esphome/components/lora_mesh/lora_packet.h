@@ -42,7 +42,7 @@ static constexpr size_t MESH_MAX_DATA_PAYLOAD_SIZE = 218;
 // 10  [4]  dst_id         – 0xFFFFFFFF = broadcast, immutable end-to-end
 // 14  [4]  frame_counter  – per-source monotonic counter (wraps at 2^32)
 // 18  [1]  ttl            – remaining forwarding hops, decremented on each hop
-// 19  [1]  hop_count      – hops already traversed
+// 19  [1]  hop_count      – forwarding nodes already traversed; origin starts at zero
 // 20  [4]  prev_hop       – node_id of the radio-level sender, rewritten on each forward
 // 24  [4]  next_hop       – intended forwarder; 0xFFFFFFFF = any (broadcast/flood)
 // ── total 28 bytes ──
@@ -75,10 +75,8 @@ enum class PacketType : uint8_t {
 // Flags bitfield (byte 5)
 // ───────────────────────────────────────────────────────────────────────────
 
-static constexpr uint8_t FLAG_IS_GATEWAY = 0x01;    // Sender is a gateway
-static constexpr uint8_t FLAG_IS_BROADCAST = 0x02;  // Packet is a broadcast
-static constexpr uint8_t FLAG_ACK_REQUESTED = 0x04;
-static constexpr uint8_t FLAG_IS_FORWARD = 0x08;  // This is a forwarded packet
+static constexpr uint8_t FLAG_IS_GATEWAY = 0x01;    // Origin had upstream connectivity at send time
+static constexpr uint8_t FLAG_IS_BROADCAST = 0x02;  // DATA destination is broadcast
 
 // ───────────────────────────────────────────────────────────────────────────
 // HELLO payload (after the 28-byte header)

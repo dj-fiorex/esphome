@@ -1,24 +1,38 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # lora_mesh — three-board real-hardware test (Heltec WiFi LoRa 32 V3)
 #
-# Flash this SAME file to all three boards. Each board gets a unique identity
+# The runnable three-pot.esp32-s3-idf.yaml wrapper supplies values through
+# !secret. Flash that same configuration to all three boards. Each gets a unique identity
 # automatically: node_id = App.get_name(), which with name_add_mac_suffix is
 # "lora-mesh-test-<mac>". Everything is observable and controllable from the
 # per-board web UI (port 80) and mirrored on the on-board OLED.
 #
-# Forcing a multi-hop chain on a bench (where all radios hear each other):
-#   link_sim is enabled. Read each board's "My node id" from its web UI, then
-#   on board A type C's node id into "Block neighbor", and on board C type A's
-#   id. Now A and C cannot hear each other directly and must route via B.
-#   Confirm A's "Mesh routing table" shows C with "hops":2, and watch the
-#   gateway board's "Last message" feed. Clear the blocks (or block B) live to
-#   exercise passive self-healing. See docs/adr/0004-link-sim-debug-filter.md.
+# Scenario: Node A -> forwarding Node B -> Gateway Node C.
+#   1. Read each board's "My node id" from its web UI.
+#   2. On A block C, and on C block A. Leave B unblocked.
+#   3. On C enable "Upstream Connectivity" to promote it through the
+#      caller-owned API. A's Nearest Gateway must become C at two hops.
+#   4. Keep A offline and send to Gateway. B forwards; C's "Last message"
+#      identifies A and reports one forwarding hop (h1).
+#   5. Disable C's Upstream Connectivity to propagate a Gateway Withdrawal.
+#
+# Full procedure and application buffering/upstream contract:
+# esphome/components/lora_mesh/docs/three-pot-scenario.md
 # ─────────────────────────────────────────────────────────────────────────────
 
 substitutions:
   device_name: "lora-mesh-test"
   friendly_name: "Lora Mesh Test"
   device_description: "lora_mesh three-board mesh test on Heltec ESP32 LoRa V3."
+  scl_pin: GPIO18
+  sda_pin: GPIO17
+  clk_pin: GPIO9
+  mosi_pin: GPIO10
+  miso_pin: GPIO11
+
+packages:
+  i2c: !include ../../test_build_components/common/i2c/esp32-s3-idf.yaml
+  spi: !include ../../test_build_components/common/spi/esp32-s3-idf.yaml
 
 esphome:
   name: ${device_name}
@@ -43,8 +57,10 @@ web_server:
 
 wifi:
   id: wifi_connection
-  ssid: bambu
-  password: "1234567890"
+  # Deterministic test-only values. The runnable wrapper overrides these with
+  # !secret references.
+  ssid: "three-pot-test-network"
+  password: "three-pot-test-password"
   ap:
     ssid: "lora-mesh-fallback"
     password: "12345678"
@@ -92,19 +108,6 @@ switch:
           id: mesh
           connected: false
 
-# On-board OLED I2C bus
-i2c:
-  - sda: GPIO17
-    scl: GPIO18
-    frequency: 400kHz
-    id: bus_display
-
-# SPI bus for the LoRa radio
-spi:
-  clk_pin: GPIO9
-  mosi_pin: GPIO10
-  miso_pin: GPIO11
-
 # LoRa radio
 sx126x:
   id: lora_radio
@@ -143,7 +146,8 @@ lora_mesh:
   id: mesh
   radio_id: lora_radio
   node_id: !lambda "return App.get_name();"
-  # Deterministic test-only key; production configurations should use !secret.
+  # Deterministic test-only key. The runnable wrapper overrides this with an
+  # ESPHome !secret reference.
   fabric_key: "00000000000000000000000000000000"
   link_sim: true
   # Test-tuned timings: fast convergence + prompt expiry so multi-hop and
@@ -306,7 +310,7 @@ display:
     model: "SSD1306 128x64"
     reset_pin: GPIO21
     address: 0x3C
-    i2c_id: bus_display
+    i2c_id: i2c_bus
     pages:
       - id: page_mesh
         lambda: |-

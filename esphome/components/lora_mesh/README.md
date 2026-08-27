@@ -114,6 +114,17 @@ There is no Gateway-specific heartbeat, probe, timeout, Route discovery exchange
 returns `false` when no Gateway is reachable or the TX queue cannot accept the packet; persistence and retry policy
 belong to the application.
 
+### Application integration contract
+
+An online Jocondo publishes directly through its own upstream integration and does not call `send_to_gateway()` for
+local delivery. An offline Jocondo owns buffering and retry around `send_to_gateway()`: it retains the application
+record and retries on its normal schedule when the mesh returns `false`.
+
+When a Gateway publishes a LoRa uplink, the application includes both the source Node and the receiving Gateway. The
+server records that Gateway as the Node's current downlink affinity. For a later downlink, the server targets that
+Gateway and the Gateway calls named `send_message(destination, payload)` unicast. MQTT topics, upstream sessions,
+application acknowledgements, durable command sequencing, and retries remain outside `lora_mesh`.
+
 ## Automations and diagnostics
 
 `on_message` receives a `MeshMessage` with source, optional source name, destination, previous hop, payload, counter,
@@ -178,5 +189,7 @@ tests/components/lora_mesh/host_tests/run.sh
 ```
 
 The YAML/code-generation fixtures under `tests/components/lora_mesh/` cover validation, the templatable Upstream
-Connectivity action, diagnostics, and ESP32 Arduino/ESP-IDF builds. `test.heltek-idf.yaml` is the three-board smoke test;
-its Upstream Connectivity switch demonstrates Gateway promotion and withdrawal without coupling the mesh to Wi-Fi.
+Connectivity action, diagnostics, and ESP32 Arduino/ESP-IDF builds. `test-three-pot.esp32-s3-idf.yaml` is the compiled
+fixture for the runnable `three-pot.esp32-s3-idf.yaml` hardware scenario. Its Upstream Connectivity switch demonstrates
+Gateway promotion and withdrawal without coupling the mesh to Wi-Fi. See
+[three-pot-scenario.md](docs/three-pot-scenario.md) for the A→B→C setup and Jocondo integration contract.
