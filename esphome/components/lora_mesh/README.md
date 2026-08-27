@@ -131,9 +131,10 @@ application acknowledgements, durable command sequencing, and retries remain out
 `on_message` receives a `MeshMessage` with source, optional source name, destination, previous hop, payload, counter,
 hop count, TTL, RSSI, SNR, and broadcast/destination flags. `MeshMessage.payload` is an owning, fixed-capacity
 `StaticVector<uint8_t, MESH_MAX_DATA_PAYLOAD_SIZE>`. It stays valid when ESPHome copies the message into a delayed
-automation action, without allocating. This is a breaking change from the former owning `std::string`; text consumers
-should use `payload.data()` with `payload.size()` as shown above. `on_route_update` fires when observable Route state
-changes.
+automation action, and the payload copy itself does not allocate. ESPHome actions and the scheduler can have their own
+allocation behavior outside the component's packet dispatch. This is a breaking change from the former owning
+`std::string`; text consumers should use `payload.data()` with `payload.size()` as shown above. `on_route_update` fires
+when observable Route state changes.
 
 Optional diagnostics are connected by ID:
 
