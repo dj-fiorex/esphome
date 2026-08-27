@@ -8,6 +8,8 @@ namespace esphome::lora_mesh {
 
 class LoraMesh;
 
+enum class TransmissionOutcome : uint8_t { SUCCESS = 0, TIMEOUT, INVALID_PARAMETER };
+
 /**
  * Abstract radio interface used by LoraMesh.
  *
@@ -19,8 +21,8 @@ class LoRaRadio {
  public:
   virtual ~LoRaRadio() = default;
 
-  /** Transmit a raw byte buffer via the LoRa radio. */
-  virtual void transmit_packet(const Packet &data) = 0;
+  /** Transmit a raw byte buffer and report a transport-neutral outcome. */
+  virtual TransmissionOutcome transmit_packet(const Packet &data) = 0;
 
   /** Return the maximum payload size supported by the underlying radio. */
   virtual size_t get_max_packet_size() = 0;

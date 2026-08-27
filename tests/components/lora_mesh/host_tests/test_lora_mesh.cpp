@@ -1261,6 +1261,61 @@ static void test_app_send_is_queued_not_transmitted_inline() {
   EXPECT_EQ(a.radio.sent[0][4], PKT_DATA);
 }
 
+static void test_successful_radio_outcome_removes_packet_from_queue() {
+  TestNode a("node-a");
+  a.radio.attempted.clear();
+
+  EXPECT_TRUE(a.mesh.broadcast_message("success"));
+  a.mesh.loop();
+  a.mesh.loop();
+
+  EXPECT_EQ(a.radio.attempted.size(), 1u);
+  EXPECT_EQ(a.radio.sent.size(), 1u);
+}
+
+static void test_radio_timeout_drops_failed_packet_and_continues_queue_without_retry() {
+  TestNode a("node-a");
+  a.radio.attempted.clear();
+  a.radio.transmit_outcome = TransmissionOutcome::TIMEOUT;
+  esphome::test_log_clear();
+
+  EXPECT_TRUE(a.mesh.broadcast_message("first"));
+  EXPECT_TRUE(a.mesh.broadcast_message("second"));
+  a.mesh.loop();
+
+  EXPECT_EQ(a.radio.attempted.size(), 1u);
+  EXPECT_EQ(a.radio.sent.size(), 0u);
+  EXPECT_TRUE(esphome::test_log_contains("Radio transmission timed out; packet dropped"));
+
+  a.radio.transmit_outcome = TransmissionOutcome::SUCCESS;
+  a.mesh.loop();
+  a.mesh.loop();
+
+  EXPECT_EQ(a.radio.attempted.size(), 2u);
+  EXPECT_EQ(a.radio.sent.size(), 1u);
+  EXPECT_EQ(a.radio.sent[0][HDR], 6u);  // The second packet was next; the failed first packet was not retried.
+}
+
+static void test_invalid_radio_parameters_drop_packet_without_retry() {
+  TestNode a("node-a");
+  a.radio.attempted.clear();
+  a.radio.transmit_outcome = TransmissionOutcome::INVALID_PARAMETER;
+  esphome::test_log_clear();
+
+  EXPECT_TRUE(a.mesh.broadcast_message("invalid"));
+  a.mesh.loop();
+
+  EXPECT_EQ(a.radio.attempted.size(), 1u);
+  EXPECT_EQ(a.radio.sent.size(), 0u);
+  EXPECT_TRUE(esphome::test_log_contains("Radio rejected transmission parameters; packet dropped"));
+
+  a.radio.transmit_outcome = TransmissionOutcome::SUCCESS;
+  a.mesh.loop();
+
+  EXPECT_EQ(a.radio.attempted.size(), 1u);
+  EXPECT_EQ(a.radio.sent.size(), 0u);
+}
+
 static void test_at_most_one_transmit_per_loop() {
   TestNode a("node-a");
 
@@ -1681,6 +1736,9 @@ int main() {
   RUN_TEST(test_gateway_hello_rate_limit_preserves_final_stable_state);
   RUN_TEST(test_silent_gateway_expires_after_three_missed_hellos_and_next_send_uses_alternative);
   RUN_TEST(test_app_send_is_queued_not_transmitted_inline);
+  RUN_TEST(test_successful_radio_outcome_removes_packet_from_queue);
+  RUN_TEST(test_radio_timeout_drops_failed_packet_and_continues_queue_without_retry);
+  RUN_TEST(test_invalid_radio_parameters_drop_packet_without_retry);
   RUN_TEST(test_at_most_one_transmit_per_loop);
   RUN_TEST(test_forwarding_is_queued_not_inline);
   RUN_TEST(test_randomized_backoff_delays_transmit);

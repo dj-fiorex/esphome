@@ -58,6 +58,10 @@ lora_mesh:
 | `tx_queue_size` | `8` | Compile-time bounded TX queue capacity. |
 | `link_sim` | `false` | Debug-only neighbour blocklist used by the three-board test. |
 
+The TX queue attempts each accepted packet once. Radio timeouts and invalid-parameter failures are logged, the failed
+packet is dropped, and the next queued packet may proceed on a later `loop()` iteration. Delivery acknowledgement,
+persistence, and retry remain application concerns.
+
 When `node_id` is omitted, the Node ID is the last three raw MAC bytes formatted as six uppercase hexadecimal
 characters (for example, MAC `02:00:00:AB:CD:EF` produces `ABCDEF`). This value is stable for a given MAC and is
 hashed with 32-bit FNV-1a exactly like a configured Node ID to produce the wire identity.

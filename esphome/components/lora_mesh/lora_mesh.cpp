@@ -801,8 +801,14 @@ void LoraMesh::drain_tx_queue_(uint32_t now) {
     refreshed_hello = this->build_hello_packet_();
     packet_to_send = &refreshed_hello;
   }
+  TransmissionOutcome outcome = TransmissionOutcome::SUCCESS;
   if (this->radio_ != nullptr && !packet_to_send->empty()) {
-    this->radio_->transmit_packet(*packet_to_send);
+    outcome = this->radio_->transmit_packet(*packet_to_send);
+  }
+  if (outcome == TransmissionOutcome::TIMEOUT) {
+    ESP_LOGE(TAG, "Radio transmission timed out; packet dropped");
+  } else if (outcome == TransmissionOutcome::INVALID_PARAMETER) {
+    ESP_LOGE(TAG, "Radio rejected transmission parameters; packet dropped");
   }
   if (is_hello) {
     if (!packet_to_send->empty()) {

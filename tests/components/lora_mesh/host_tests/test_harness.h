@@ -73,6 +73,7 @@ namespace lmtest {
 
 using esphome::lora_mesh::LoraMesh;
 using esphome::lora_mesh::Packet;
+using esphome::lora_mesh::TransmissionOutcome;
 using esphome::lora_mesh::fnv1a_str;
 using esphome::lora_mesh::get_u32_le;
 using esphome::lora_mesh::put_u32_le;
@@ -81,13 +82,21 @@ using esphome::lora_mesh::FABRIC_KEY_SIZE;
 
 class FakeRadio : public esphome::lora_mesh::LoRaRadio {
  public:
-  void transmit_packet(const Packet &data) override { this->sent.emplace_back(data.begin(), data.end()); }
+  TransmissionOutcome transmit_packet(const Packet &data) override {
+    this->attempted.emplace_back(data.begin(), data.end());
+    if (this->transmit_outcome == TransmissionOutcome::SUCCESS) {
+      this->sent.emplace_back(data.begin(), data.end());
+    }
+    return this->transmit_outcome;
+  }
   size_t get_max_packet_size() override { return this->max_packet_size; }
   void attach_listener(LoraMesh *mesh) override { this->listener = mesh; }
 
+  std::vector<std::vector<uint8_t>> attempted;
   std::vector<std::vector<uint8_t>> sent;
   LoraMesh *listener{nullptr};
   size_t max_packet_size{255};
+  TransmissionOutcome transmit_outcome{TransmissionOutcome::SUCCESS};
 };
 
 static constexpr const char *TEST_FABRIC_KEY_HEX = "0102030405060708090a0b0c0d0e0f10";

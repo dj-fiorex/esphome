@@ -7,6 +7,22 @@
 #include "lora_radio.h"
 #include <vector>
 
+namespace esphome::lora_mesh::detail {
+
+template<typename RadioError> TransmissionOutcome to_transmission_outcome(RadioError error) {
+  switch (error) {
+    case RadioError::NONE:
+      return TransmissionOutcome::SUCCESS;
+    case RadioError::TIMEOUT:
+      return TransmissionOutcome::TIMEOUT;
+    case RadioError::INVALID_PARAMS:
+      return TransmissionOutcome::INVALID_PARAMETER;
+  }
+  return TransmissionOutcome::INVALID_PARAMETER;
+}
+
+}  // namespace esphome::lora_mesh::detail
+
 #ifdef LORA_MESH_USE_SX126X
 #include "esphome/components/sx126x/sx126x.h"
 
@@ -22,10 +38,10 @@ class LoRaSX126xRadio : public LoRaRadio, public sx126x::SX126xListener {
  public:
   explicit LoRaSX126xRadio(sx126x::SX126x *radio) : radio_(radio) {}
 
-  void transmit_packet(const Packet &data) override {
+  TransmissionOutcome transmit_packet(const Packet &data) override {
     // Convert the stack-allocated Packet to the vector the sx126x API expects.
     std::vector<uint8_t> vec(data.begin(), data.end());
-    this->radio_->transmit_packet(vec);
+    return detail::to_transmission_outcome(this->radio_->transmit_packet(vec));
   }
 
   size_t get_max_packet_size() override { return this->radio_->get_max_packet_size(); }
@@ -63,10 +79,10 @@ class LoRaSX127xRadio : public LoRaRadio, public sx127x::SX127xListener {
  public:
   explicit LoRaSX127xRadio(sx127x::SX127x *radio) : radio_(radio) {}
 
-  void transmit_packet(const Packet &data) override {
+  TransmissionOutcome transmit_packet(const Packet &data) override {
     // Convert the stack-allocated Packet to the vector the sx127x API expects.
     std::vector<uint8_t> vec(data.begin(), data.end());
-    this->radio_->transmit_packet(vec);
+    return detail::to_transmission_outcome(this->radio_->transmit_packet(vec));
   }
 
   size_t get_max_packet_size() override { return this->radio_->get_max_packet_size(); }

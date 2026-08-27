@@ -76,11 +76,9 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(LoraMesh),
-            # Radio reference — must be an sx126x or sx127x component ID.
-            cv.Required(CONF_RADIO_ID): cv.Any(
-                cv.use_id(SX126x),
-                cv.use_id(SX127x),
-            ),
+            # SX126x and SX127x have no shared C++ base. Resolve the declared
+            # ID without pre-assigning one driver type; to_code validates it.
+            cv.Required(CONF_RADIO_ID): cv.use_id(None),
             # Node / Fabric identity and security
             cv.Optional(CONF_NODE_ID): cv.templatable(cv.string),
             cv.Required(CONF_FABRIC_KEY): cv.sensitive(
@@ -148,11 +146,10 @@ async def to_code(config) -> None:
         cg.add_define("LORA_MESH_LINK_SIM")
 
     # ── Radio adapter ──────────────────────────────────────────────────────
-    radio_var = await cg.get_variable(config[CONF_RADIO_ID])
+    radio_id, radio_var = await cg.get_variable_with_full_id(config[CONF_RADIO_ID])
+    radio_type = radio_id.type
 
-    radio_type = getattr(radio_var, "type", None)
-
-    if radio_type == SX126x:
+    if radio_type is SX126x:
         cg.add_define("LORA_MESH_USE_SX126X")
         adapter_id = ID(
             f"{config[CONF_ID].id}_radio_adapter",
@@ -162,7 +159,7 @@ async def to_code(config) -> None:
         adapter = cg.new_Pvariable(adapter_id, radio_var)
         cg.add(var.set_radio(adapter))
 
-    elif radio_type == SX127x:
+    elif radio_type is SX127x:
         cg.add_define("LORA_MESH_USE_SX127X")
         adapter_id = ID(
             f"{config[CONF_ID].id}_radio_adapter",
