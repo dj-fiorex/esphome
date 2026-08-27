@@ -150,9 +150,9 @@ class LoraMesh : public Component {
   // ── Packet processing ──────────────────────────────────────────────────
   void process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset, uint32_t src_id, bool src_is_gateway,
                       uint32_t prev_hop, float rssi, float snr);
-  void process_data_(const uint8_t *pkt, size_t pkt_len, size_t offset, uint32_t src_id, uint32_t dst_id,
-                     uint32_t frame_counter, uint8_t ttl, uint8_t hop_count, uint32_t prev_hop, uint32_t next_hop,
-                     uint8_t flags, float rssi, float snr);
+  void process_data_(const uint8_t *pkt, size_t pkt_len, const uint8_t *plaintext, uint8_t payload_len, uint32_t src_id,
+                     uint32_t dst_id, uint32_t frame_counter, uint8_t ttl, uint8_t hop_count, uint32_t prev_hop,
+                     uint32_t next_hop, uint8_t flags, float rssi, float snr);
 
   // ── Routing helpers ────────────────────────────────────────────────────
   RouteEntry *find_route_(uint32_t dst_id);

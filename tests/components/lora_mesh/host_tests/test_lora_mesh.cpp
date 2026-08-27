@@ -1133,6 +1133,46 @@ static void test_modified_data_does_not_reach_application_callback() {
   EXPECT_EQ(b.received.size(), 0u);
 }
 
+static void test_modified_broadcast_data_is_not_delivered_or_forwarded() {
+  TestNode b("node-b");
+  auto pkt = make_data(FABRIC, NODE_A, BROADCAST, BROADCAST, "authentic", 10, 8, 0, NODE_A);
+
+  pkt[HDR + 1] ^= 0x01;
+  b.receive(pkt);
+  b.mesh.loop();
+
+  EXPECT_EQ(b.received.size(), 0u);
+  EXPECT_EQ(b.radio.sent.size(), 0u);
+}
+
+static void test_modified_transit_unicast_data_is_not_forwarded() {
+  TestNode b("node-b");
+  b.receive(make_hello(FABRIC, NODE_C, "node-c"));
+  b.radio.sent.clear();
+  auto pkt = make_data(FABRIC, NODE_A, NODE_C, NODE_B, "authentic", 10, 8, 0, NODE_A);
+
+  pkt[HDR + 1] ^= 0x01;
+  b.receive(pkt);
+  b.mesh.loop();
+
+  EXPECT_EQ(b.radio.sent.size(), 0u);
+}
+
+static void test_modified_data_cannot_poison_seen_cache() {
+  TestNode b("node-b");
+  auto authentic = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "authentic", 10, 8, 0, NODE_A);
+  auto modified = authentic;
+  modified[HDR + 1] ^= 0x01;
+
+  b.receive(modified);
+  b.receive(authentic);
+
+  EXPECT_EQ(b.received.size(), 1u);
+  if (!b.received.empty()) {
+    EXPECT_TRUE(b.received[0].payload == "authentic");
+  }
+}
+
 static void test_modified_data_flags_do_not_reach_application_callback() {
   TestNode b("node-b");
   auto pkt = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "authentic", 10, 8, 0, NODE_A);
@@ -1281,6 +1321,9 @@ int main() {
   RUN_TEST(test_message_copy_owns_payload_for_deferred_automation);
   RUN_TEST(test_wrong_key_drops_packet);
   RUN_TEST(test_modified_data_does_not_reach_application_callback);
+  RUN_TEST(test_modified_broadcast_data_is_not_delivered_or_forwarded);
+  RUN_TEST(test_modified_transit_unicast_data_is_not_forwarded);
+  RUN_TEST(test_modified_data_cannot_poison_seen_cache);
   RUN_TEST(test_modified_data_flags_do_not_reach_application_callback);
   RUN_TEST(test_data_with_trailing_bytes_does_not_reach_application_callback);
   RUN_TEST(test_protocol_v3_four_byte_data_tag_is_rejected);

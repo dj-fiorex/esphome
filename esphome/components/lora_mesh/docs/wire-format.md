@@ -114,11 +114,12 @@ runtime-only; durable application command sequencing owns reboot-safe actuator i
 ## Receive and Forwarding summary
 
 1. Reject a mismatched Fabric ID or the Node's own echoed source ID.
-2. For HELLO, validate its version, exact shape, and HMAC before consulting or changing the Seen-cache.
+2. Before consulting or changing the Seen-cache, validate a HELLO's version, exact shape, and HMAC, or validate a
+   DATA envelope and authenticate-decrypt it with the Fabric Key.
 3. Reject an already-seen `(src_id, frame_counter)` pair.
 4. For authenticated HELLO, update direct and advertised Routes and Node names.
-5. For DATA addressed to this Node or broadcast, verify/decrypt with the Fabric Key, replay-check, then deliver.
-6. Forward eligible DATA by copying the authenticated-encrypted body unchanged and rewriting only `ttl`,
+5. For DATA addressed to this Node or broadcast, replay-check the authenticated plaintext, then deliver.
+6. Forward eligible authenticated DATA by copying the encrypted body unchanged and rewriting only `ttl`,
    `hop_count`, `prev_hop`, and `next_hop`.
 
 Unicast remains single-path through the designated Next Hop. Broadcast remains flood-based. Both carry only

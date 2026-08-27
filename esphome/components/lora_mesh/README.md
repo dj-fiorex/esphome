@@ -9,7 +9,7 @@ DATA with AES-128-CCM, and derives a separate control-plane key that authenticat
 
 ## Core model
 
-- Every device is a Node and may Forward packets. There is no configured relay role.
+- Every Node may Forward packets; Forwarding is not a configured role.
 - A Node is a Gateway only while its caller reports Upstream Connectivity.
 - Every Node starts with Upstream Connectivity set to `false`.
 - `lora_mesh` never imports or inspects Wi-Fi, MQTT, HTTP, Appwrite, or another upstream implementation.

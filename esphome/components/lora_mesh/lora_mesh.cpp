@@ -354,6 +354,8 @@ void LoraMesh::on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, f
   uint8_t hop_count = h[MESH_OFF_HOP_COUNT];
   uint32_t prev_hop = get_u32_le(h + MESH_OFF_PREV_HOP);
   uint32_t next_hop = get_u32_le(h + MESH_OFF_NEXT_HOP);
+  uint8_t plaintext[MESH_MAX_DATA_PAYLOAD_SIZE];
+  uint8_t payload_len = 0;
 
 #ifdef LORA_MESH_LINK_SIM
   // Link simulator: pretend this packet was never received because its
@@ -384,6 +386,13 @@ void LoraMesh::on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, f
       if (!this->validate_data_envelope_(pkt, pkt_len, dst_id, flags)) {
         return;
       }
+      payload_len = pkt[MESH_HEADER_SIZE];
+      if (!mesh_decrypt_payload(this->fabric_key_.data(), src_id, dst_id, frame_counter,
+                                static_cast<uint8_t>(PacketType::DATA), flags, payload_len, pkt + MESH_HEADER_SIZE + 1,
+                                plaintext, pkt + MESH_HEADER_SIZE + 1 + payload_len)) {
+        ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " authentication failed, dropped", src_id);
+        return;
+      }
       break;
     default:
       ESP_LOGD(TAG, "Unhandled packet type %u from 0x%08" PRIX32, static_cast<uint8_t>(pkt_type), src_id);
@@ -404,7 +413,7 @@ void LoraMesh::on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, f
       this->process_hello_(pkt, pkt_len, MESH_HEADER_SIZE, src_id, src_is_gw, prev_hop, rssi, snr);
       break;
     case PacketType::DATA:
-      this->process_data_(pkt, pkt_len, MESH_HEADER_SIZE, src_id, dst_id, frame_counter, ttl, hop_count, prev_hop,
+      this->process_data_(pkt, pkt_len, plaintext, payload_len, src_id, dst_id, frame_counter, ttl, hop_count, prev_hop,
                           next_hop, flags, rssi, snr);
       break;
     default:
@@ -535,66 +544,38 @@ void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset,
 
 // ─── DATA processing ──────────────────────────────────────────────────────────
 
-void LoraMesh::process_data_(const uint8_t *pkt, size_t pkt_len, size_t offset, uint32_t src_id, uint32_t dst_id,
-                             uint32_t frame_counter, uint8_t ttl, uint8_t hop_count, uint32_t prev_hop,
-                             uint32_t next_hop, uint8_t flags, float rssi, float snr) {
-  // Validate the protocol-v4 DATA envelope before delivery or forwarding. This
-  // rejects legacy four-byte tags, truncation, and unauthenticated trailing data.
-  if (pkt_len < offset + 1) {
-    return;
-  }
-  uint8_t payload_len = pkt[offset];
-  size_t payload_start = offset + 1;
-  size_t expected_size = payload_start + payload_len + DATA_AUTH_TAG_SIZE;
-  if (payload_len > MESH_MAX_DATA_PAYLOAD_SIZE || pkt_len != expected_size) {
-    return;
-  }
-
+void LoraMesh::process_data_(const uint8_t *pkt, size_t pkt_len, const uint8_t *plaintext, uint8_t payload_len,
+                             uint32_t src_id, uint32_t dst_id, uint32_t frame_counter, uint8_t ttl, uint8_t hop_count,
+                             uint32_t prev_hop, uint32_t next_hop, uint8_t flags, float rssi, float snr) {
   bool is_broadcast = dst_id == MESH_BROADCAST_ID;
-  if (is_broadcast != ((flags & FLAG_IS_BROADCAST) != 0)) {
-    return;
-  }
   bool is_for_us = is_broadcast || (dst_id == this->node_id_);
 
   if (is_for_us) {
-    const uint8_t *ciphertext = pkt + payload_start;
-    const uint8_t *tag = pkt + payload_start + payload_len;
-
-    uint8_t plaintext[MESH_MAX_DATA_PAYLOAD_SIZE];
-    bool tag_ok =
-        mesh_decrypt_payload(this->fabric_key_.data(), src_id, dst_id, frame_counter,
-                             static_cast<uint8_t>(PacketType::DATA), flags, payload_len, ciphertext, plaintext, tag);
-    if (!tag_ok) {
-      ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " authentication failed, dropped", src_id);
-    } else {
-      // Authenticate before replay handling so unauthenticated counters cannot
-      // advance the receiver high-water mark.
-      if (this->is_replay_(src_id, frame_counter)) {
-        ESP_LOGW(TAG, "DATA from 0x%08" PRIX32 " frame=%" PRIu32 " replay rejected", src_id, frame_counter);
-        return;
-      }
-      this->update_replay_counter_(src_id, frame_counter);
-
-      MeshMessage msg;
-      LoraMesh::id_to_hex(src_id, msg.source);
-      const char *src_name = this->lookup_node_name_(src_id);
-      if (src_name != nullptr) {
-        snprintf(msg.source_name, sizeof(msg.source_name), "%s", src_name);
-      }
-      LoraMesh::id_to_hex(dst_id, msg.destination);
-      LoraMesh::id_to_hex(prev_hop, msg.prev_hop);
-      msg.payload.assign(plaintext, plaintext + payload_len);
-      msg.frame_counter = frame_counter;
-      msg.hop_count = hop_count;
-      msg.ttl = ttl;
-      msg.rssi = rssi;
-      msg.snr = snr;
-      msg.is_broadcast = is_broadcast;
-      msg.is_for_this_node = !is_broadcast;
-
-      ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " hops=%u len=%u", src_id, hop_count, payload_len);
-      this->message_callback_(msg);
+    if (this->is_replay_(src_id, frame_counter)) {
+      ESP_LOGW(TAG, "DATA from 0x%08" PRIX32 " frame=%" PRIu32 " replay rejected", src_id, frame_counter);
+      return;
     }
+    this->update_replay_counter_(src_id, frame_counter);
+
+    MeshMessage msg;
+    LoraMesh::id_to_hex(src_id, msg.source);
+    const char *src_name = this->lookup_node_name_(src_id);
+    if (src_name != nullptr) {
+      snprintf(msg.source_name, sizeof(msg.source_name), "%s", src_name);
+    }
+    LoraMesh::id_to_hex(dst_id, msg.destination);
+    LoraMesh::id_to_hex(prev_hop, msg.prev_hop);
+    msg.payload.assign(plaintext, plaintext + payload_len);
+    msg.frame_counter = frame_counter;
+    msg.hop_count = hop_count;
+    msg.ttl = ttl;
+    msg.rssi = rssi;
+    msg.snr = snr;
+    msg.is_broadcast = is_broadcast;
+    msg.is_for_this_node = !is_broadcast;
+
+    ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " hops=%u len=%u", src_id, hop_count, payload_len);
+    this->message_callback_(msg);
   }
 
   // Forward if TTL allows, forwarding is enabled, and packet is not unicast-only-to-us.
@@ -617,7 +598,7 @@ void LoraMesh::process_data_(const uint8_t *pkt, size_t pkt_len, size_t offset, 
 
   // Packet forwarding: copy the incoming packet into a stack-allocated Packet,
   // then patch the TTL, hop_count, prev_hop and next_hop fields before retransmitting.
-  // Header + encrypted body are Forwarded verbatim (the Forwarding Node does not need the key).
+  // The authenticated immutable header fields and encrypted body are Forwarded verbatim.
   Packet fwd(pkt, pkt + pkt_len);
   fwd[MESH_OFF_TTL] = ttl - 1;
   fwd[MESH_OFF_HOP_COUNT] = hop_count + 1;
