@@ -908,12 +908,16 @@ void LoraMesh::update_route_(uint32_t dst_id, uint32_t next_hop, uint8_t hops, b
     r->dst_id = dst_id;
     changed = true;
   }
-  if (!r->is_valid || hops < r->hop_count || (hops == r->hop_count && rssi > r->rssi) || r->next_hop_id != next_hop) {
+  bool current_route_reconfirmed = r->is_valid && hops == r->hop_count && r->next_hop_id == next_hop;
+  bool update_path = !r->is_valid || current_route_reconfirmed || hops < r->hop_count ||
+                     (hops == r->hop_count && rssi > r->rssi) || r->next_hop_id != next_hop;
+  if (update_path) {
+    changed = changed || !r->is_valid || r->next_hop_id != next_hop || r->hop_count != hops || r->rssi != rssi ||
+              r->snr != snr;
     r->next_hop_id = next_hop;
     r->hop_count = hops;
     r->rssi = rssi;
     r->snr = snr;
-    changed = true;
   }
   // A node's gateway status can change independently of its path metric (e.g. it
   // becomes a gateway after we first learned it as a plain neighbour). Refresh the

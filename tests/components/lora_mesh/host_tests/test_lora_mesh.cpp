@@ -519,19 +519,87 @@ static void test_three_node_line_unicast_and_broadcast() {
 static void test_multihop_route_lease_renewed_on_reconfirmation() {
   TestNode receiving_node("node-a");
   receiving_node.mesh.set_route_ttl(300000);
+  int route_updates = 0;
+  receiving_node.mesh.add_on_route_update_callback([&route_updates]() { ++route_updates; });
 
   // C via B, learned at t0 under a 300-second test lease.
   receiving_node.receive(make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 1, -70}}, 0, 1));
+  route_updates = 0;
 
   // At t0+250s B re-confirms the same route at equal quality (same next hop,
   // same hop count) — this must renew the lease, not just on improvement.
   advance_and_loop(receiving_node, 250000);
   receiving_node.receive(make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 1, -70}}, 0, 2));
+  EXPECT_EQ(route_updates, 0);
 
   // t0+350s: past the original lease, within the renewed one.
   advance_and_loop(receiving_node, 100000);
   EXPECT_TRUE(receiving_node.mesh.has_route("node-b"));
   EXPECT_TRUE(receiving_node.mesh.has_route("node-c"));  // pre-fix: expired despite re-confirmation
+}
+
+static void test_direct_gateway_route_degradation_reselects_stronger_equal_hop_gateway() {
+  TestNode a("node-a");
+  int route_updates = 0;
+  a.mesh.add_on_route_update_callback([&route_updates]() { ++route_updates; });
+
+  // B initially wins as the stronger direct Gateway Route.
+  a.receive(make_hello(FABRIC, NODE_B, "node-b", {}, FLAG_GATEWAY, 1), -60.0f, 7.0f);
+  a.receive(make_hello(FABRIC, NODE_C, "node-c", {}, FLAG_GATEWAY, 1), -80.0f, 5.0f);
+  expect_nearest_gateway(a, NODE_B);
+  route_updates = 0;
+
+  // Reconfirmation from the current Next Hop must replace its historical
+  // high-water metric when the direct link degrades.
+  a.receive(make_hello(FABRIC, NODE_B, "node-b", {}, FLAG_GATEWAY, 2), -90.0f, -4.0f);
+  expect_nearest_gateway(a, NODE_C);
+  EXPECT_EQ(route_updates, 1);
+
+  // An SNR-only change is observable once, proving the latest SNR replaces
+  // the stored value while an identical confirmation only renews the lease.
+  route_updates = 0;
+  a.receive(make_hello(FABRIC, NODE_B, "node-b", {}, FLAG_GATEWAY, 3), -90.0f, -5.0f);
+  EXPECT_EQ(route_updates, 1);
+  route_updates = 0;
+  a.receive(make_hello(FABRIC, NODE_B, "node-b", {}, FLAG_GATEWAY, 4), -90.0f, -5.0f);
+  EXPECT_EQ(route_updates, 0);
+}
+
+static void test_multihop_route_reconfirmation_updates_degraded_path_rssi() {
+  TestNode a("node-a");
+
+  // C is reached through B. The first Path RSSI is limited by C's advertised
+  // -60 dBm path because A's direct link to B is stronger.
+  a.receive(make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 1, -60, true}}, 0, 1), -50.0f, 6.0f);
+  expect_nearest_gateway(a, NODE_C);
+  advance_and_loop(a, 1000);  // consume C's prompt Gateway availability HELLO
+  a.radio.sent.clear();
+
+  // B later re-confirms the same Route after its path to C has degraded. A
+  // must store the new weakest-link metric rather than retain -60 dBm.
+  a.receive(make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 1, -90, true}}, 0, 2), -50.0f, -3.0f);
+
+  // The next periodic HELLO must propagate C's degraded Path RSSI.
+  advance_and_loop(a, 30000);
+  EXPECT_EQ(a.radio.sent.size(), 1u);
+  EXPECT_EQ(a.radio.sent[0][4], PKT_HELLO);
+  bool found_degraded_route = false;
+  for (size_t index = 0; index < hello_route_count(a.radio.sent[0]); ++index) {
+    RouteAdv route = hello_route_at(a.radio.sent[0], index);
+    if (route.dest_id == NODE_C) {
+      found_degraded_route = true;
+      EXPECT_EQ(route.hop_count, 2u);
+      EXPECT_EQ(route.rssi, -90);
+      EXPECT_TRUE(route.is_gateway);
+    }
+  }
+  EXPECT_TRUE(found_degraded_route);
+
+  a.radio.sent.clear();
+  EXPECT_TRUE(a.mesh.send_to_gateway("status"));
+  a.mesh.loop();
+  EXPECT_EQ(get_u32_le(&a.radio.sent[0][esphome::lora_mesh::MESH_OFF_DST_ID]), NODE_C);
+  EXPECT_EQ(get_u32_le(&a.radio.sent[0][esphome::lora_mesh::MESH_OFF_NEXT_HOP]), NODE_B);
 }
 
 static void test_dead_next_hop_invalidates_dependent_routes() {
@@ -1357,6 +1425,8 @@ int main() {
   RUN_TEST(test_relay_rebroadcasts_broadcast_and_delivers_it);
   RUN_TEST(test_three_node_line_unicast_and_broadcast);
   RUN_TEST(test_multihop_route_lease_renewed_on_reconfirmation);
+  RUN_TEST(test_direct_gateway_route_degradation_reselects_stronger_equal_hop_gateway);
+  RUN_TEST(test_multihop_route_reconfirmation_updates_degraded_path_rssi);
   RUN_TEST(test_better_path_still_replaces_worse_route);
   RUN_TEST(test_dead_next_hop_invalidates_dependent_routes);
   RUN_TEST(test_gateway_flag_refreshed_when_neighbor_becomes_gateway);
