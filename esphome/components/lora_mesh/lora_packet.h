@@ -2,6 +2,7 @@
 
 #include "esphome/core/helpers.h"
 #include <cstdint>
+#include <span>
 #include <string>
 
 namespace esphome::lora_mesh {
@@ -163,7 +164,9 @@ struct MeshMessage {
   char source_name[MESH_NODE_NAME_MAX_LEN + 1]{};  // Human-readable name, or empty string if unknown
   char destination[9]{};                           // Human-readable destination
   char prev_hop[9]{};                              // Node that sent this to us
-  std::string payload;                             // Application data
+  // Non-owning plaintext bytes. Valid only for the duration of the on_message
+  // callback; copy at the application boundary if the payload must outlive it.
+  std::span<const uint8_t> payload;
   uint32_t frame_counter{0};
   uint8_t hop_count{0};
   uint8_t ttl{0};

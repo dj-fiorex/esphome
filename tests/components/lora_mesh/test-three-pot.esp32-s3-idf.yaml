@@ -165,12 +165,13 @@ lora_mesh:
   on_message:
     then:
       - lambda: |-
-          ESP_LOGI("mesh", "MSG from %s (%s) hops=%u: %s",
-                   x.source, x.source_name, x.hop_count, x.payload.c_str());
+          ESP_LOGI("mesh", "MSG from %s (%s) hops=%u: %.*s",
+                   x.source, x.source_name, x.hop_count, static_cast<int>(x.payload.size()),
+                   reinterpret_cast<const char *>(x.payload.data()));
           char buf[96];
-          snprintf(buf, sizeof(buf), "%s h%u: %s",
+          snprintf(buf, sizeof(buf), "%s h%u: %.*s",
                    x.source_name[0] ? x.source_name : x.source, x.hop_count,
-                   x.payload.c_str());
+                   static_cast<int>(x.payload.size()), reinterpret_cast<const char *>(x.payload.data()));
           id(last_message).publish_state(buf);
       - rtttl.play: "rx:d=16,o=6,b=200:c"
 

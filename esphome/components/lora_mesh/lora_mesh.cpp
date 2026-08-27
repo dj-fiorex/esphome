@@ -153,7 +153,7 @@ void LoraMesh::dump_config() {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-bool LoraMesh::send_message(const std::string &destination, const std::string &payload) {
+bool LoraMesh::send_message(const std::string &destination, std::span<const uint8_t> payload) {
   uint32_t dst_id = fnv1a_str(destination);
   const RouteEntry *route = this->find_route_(dst_id);
   if (route == nullptr) {
@@ -171,7 +171,7 @@ bool LoraMesh::send_message(const std::string &destination, const std::string &p
   return true;
 }
 
-bool LoraMesh::broadcast_message(const std::string &payload) {
+bool LoraMesh::broadcast_message(std::span<const uint8_t> payload) {
   auto pkt = this->build_data_packet_(MESH_BROADCAST_ID, MESH_BROADCAST_ID, payload);
   if (pkt.empty()) {
     return false;
@@ -183,7 +183,7 @@ bool LoraMesh::broadcast_message(const std::string &payload) {
   return true;
 }
 
-bool LoraMesh::send_to_gateway(const std::string &payload) {
+bool LoraMesh::send_to_gateway(std::span<const uint8_t> payload) {
   const RouteEntry *gw = this->find_nearest_gateway_route_();
   if (gw == nullptr) {
     ESP_LOGW(TAG, "send_to_gateway: no gateway in routing table");
@@ -583,7 +583,7 @@ void LoraMesh::process_data_(const uint8_t *pkt, size_t pkt_len, size_t offset, 
       }
       LoraMesh::id_to_hex(dst_id, msg.destination);
       LoraMesh::id_to_hex(prev_hop, msg.prev_hop);
-      msg.payload.assign(reinterpret_cast<const char *>(plaintext), payload_len);
+      msg.payload = std::span<const uint8_t>(plaintext, payload_len);
       msg.frame_counter = frame_counter;
       msg.hop_count = hop_count;
       msg.ttl = ttl;
@@ -719,7 +719,7 @@ Packet LoraMesh::build_hello_packet_() {
   return pkt;
 }
 
-Packet LoraMesh::build_data_packet_(uint32_t dst_id, uint32_t next_hop, const std::string &payload) {
+Packet LoraMesh::build_data_packet_(uint32_t dst_id, uint32_t next_hop, std::span<const uint8_t> payload) {
   uint8_t flags = this->upstream_connected_ ? FLAG_IS_GATEWAY : 0;
   if (dst_id == MESH_BROADCAST_ID) {
     flags |= FLAG_IS_BROADCAST;
@@ -738,9 +738,9 @@ Packet LoraMesh::build_data_packet_(uint32_t dst_id, uint32_t next_hop, const st
 
   uint8_t ciphertext[MESH_MAX_DATA_PAYLOAD_SIZE];
   uint8_t tag[DATA_AUTH_TAG_SIZE];
-  bool encrypted = mesh_encrypt_payload(this->fabric_key_.data(), this->node_id_, dst_id, fc,
-                                        static_cast<uint8_t>(PacketType::DATA), flags, static_cast<uint8_t>(len),
-                                        reinterpret_cast<const uint8_t *>(payload.data()), ciphertext, tag);
+  bool encrypted =
+      mesh_encrypt_payload(this->fabric_key_.data(), this->node_id_, dst_id, fc, static_cast<uint8_t>(PacketType::DATA),
+                           flags, static_cast<uint8_t>(len), payload.data(), ciphertext, tag);
   if (!encrypted) {
     ESP_LOGE(TAG, "Failed to encrypt DATA packet");
     return {};

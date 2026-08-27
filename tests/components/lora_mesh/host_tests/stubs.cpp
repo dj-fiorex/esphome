@@ -6,10 +6,42 @@
 #include "esphome/core/preferences.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <unordered_map>
 #include <vector>
+
+namespace {
+bool g_track_allocations = false;
+size_t g_allocation_count = 0;
+}  // namespace
+
+void *operator new(size_t size) {
+  if (g_track_allocations) {
+    ++g_allocation_count;
+  }
+  if (void *ptr = std::malloc(size)) {
+    return ptr;
+  }
+  throw std::bad_alloc();
+}
+
+void *operator new[](size_t size) {
+  if (g_track_allocations) {
+    ++g_allocation_count;
+  }
+  if (void *ptr = std::malloc(size)) {
+    return ptr;
+  }
+  throw std::bad_alloc();
+}
+
+void operator delete(void *ptr) noexcept { std::free(ptr); }
+void operator delete[](void *ptr) noexcept { std::free(ptr); }
+void operator delete(void *ptr, size_t) noexcept { std::free(ptr); }
+void operator delete[](void *ptr, size_t) noexcept { std::free(ptr); }
 
 namespace esphome {
 
@@ -21,6 +53,14 @@ uint32_t g_fake_random = 0;
 void test_clock_set(uint32_t ms) { g_fake_millis = ms; }
 void test_clock_advance(uint32_t ms) { g_fake_millis += ms; }
 void test_random_set(uint32_t v) { g_fake_random = v; }
+void test_allocations_begin() {
+  g_allocation_count = 0;
+  g_track_allocations = true;
+}
+size_t test_allocations_end() {
+  g_track_allocations = false;
+  return g_allocation_count;
+}
 
 uint32_t millis() { return g_fake_millis; }
 
@@ -28,7 +68,7 @@ uint32_t millis() { return g_fake_millis; }
 // host-test friendly to compile wholesale).
 void *callback_manager_grow(void *data, uint16_t size, uint16_t &capacity, size_t elem_size) {
   uint16_t new_cap = size + 1;
-  auto *new_data = ::operator new(new_cap * elem_size);
+  auto *new_data = ::operator new(new_cap *elem_size);
   if (data != nullptr) {
     memcpy(new_data, data, size * elem_size);
     ::operator delete(data);
@@ -110,8 +150,6 @@ static FakePreferences g_fake_prefs;
 ESPPreferences *global_preferences = &g_fake_prefs;  // NOLINT
 
 // Test helper: clear all persisted preferences (for test isolation).
-void test_preferences_clear() {
-  g_pref_store.clear();
-}
+void test_preferences_clear() { g_pref_store.clear(); }
 
 }  // namespace esphome

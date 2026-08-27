@@ -11,9 +11,11 @@
 #include "esphome/components/lora_mesh/lora_mesh.h"
 #include "esphome/components/lora_mesh/lora_mesh_crypto.h"
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -22,6 +24,8 @@ void test_clock_set(uint32_t ms);
 void test_clock_advance(uint32_t ms);
 void test_random_set(uint32_t v);
 void test_preferences_clear();
+void test_allocations_begin();
+size_t test_allocations_end();
 }  // namespace esphome
 
 // ── Assertions ──────────────────────────────────────────────────────────────
@@ -89,16 +93,59 @@ static const uint8_t TEST_FABRIC_KEY[FABRIC_KEY_SIZE] = {0x01, 0x02, 0x03, 0x04,
 // ── Node fixture ────────────────────────────────────────────────────────────
 
 struct TestNode {
+  struct CapturedPayload {
+    std::array<uint8_t, esphome::lora_mesh::MESH_MAX_DATA_PAYLOAD_SIZE> bytes{};
+    size_t length{0};
+
+    void assign(std::span<const uint8_t> payload) {
+      this->length = payload.size();
+      memcpy(this->bytes.data(), payload.data(), payload.size());
+    }
+
+    template<size_t N> bool operator==(const char (&text)[N]) const {
+      return this->length == N - 1 && memcmp(this->bytes.data(), text, N - 1) == 0;
+    }
+  };
+
+  struct CapturedMessage {
+    char source[9]{};
+    char source_name[esphome::lora_mesh::MESH_NODE_NAME_MAX_LEN + 1]{};
+    char destination[9]{};
+    char prev_hop[9]{};
+    CapturedPayload payload;
+    uint32_t frame_counter{0};
+    uint8_t hop_count{0};
+    uint8_t ttl{0};
+    float rssi{0.0f};
+    float snr{0.0f};
+    bool is_broadcast{false};
+    bool is_for_this_node{false};
+  };
+
   FakeRadio radio;
   LoraMesh mesh;
-  std::vector<esphome::lora_mesh::MeshMessage> received;
+  std::vector<CapturedMessage> received;
 
   explicit TestNode(const std::string &node_id, const std::string &fabric_key_hex = TEST_FABRIC_KEY_HEX)
       : mesh(fabric_key_hex) {
     this->mesh.set_radio(&this->radio);
     this->mesh.set_node_id(esphome::TemplatableValue<std::string>(node_id));
-    this->mesh.add_on_message_callback(
-        [this](const esphome::lora_mesh::MeshMessage &msg) { this->received.push_back(msg); });
+    this->mesh.add_on_message_callback([this](const esphome::lora_mesh::MeshMessage &msg) {
+      CapturedMessage captured;
+      memcpy(captured.source, msg.source, sizeof(captured.source));
+      memcpy(captured.source_name, msg.source_name, sizeof(captured.source_name));
+      memcpy(captured.destination, msg.destination, sizeof(captured.destination));
+      memcpy(captured.prev_hop, msg.prev_hop, sizeof(captured.prev_hop));
+      captured.payload.assign(msg.payload);
+      captured.frame_counter = msg.frame_counter;
+      captured.hop_count = msg.hop_count;
+      captured.ttl = msg.ttl;
+      captured.rssi = msg.rssi;
+      captured.snr = msg.snr;
+      captured.is_broadcast = msg.is_broadcast;
+      captured.is_for_this_node = msg.is_for_this_node;
+      this->received.push_back(captured);
+    });
     this->mesh.setup();
     // The first loop() emits the initial HELLO (frame_counter 1, jitter
     // stubbed to 0); consume it so tests start with an empty TX queue.

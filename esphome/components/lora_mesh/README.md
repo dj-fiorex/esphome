@@ -36,7 +36,8 @@ lora_mesh:
   on_message:
     then:
       - lambda: |-
-          ESP_LOGI("mesh", "From %s: %s", x.source, x.payload.c_str());
+          ESP_LOGI("mesh", "From %s: %.*s", x.source, static_cast<int>(x.payload.size()),
+                   reinterpret_cast<const char *>(x.payload.data()));
 ```
 
 ### Configuration reference
@@ -128,7 +129,10 @@ application acknowledgements, durable command sequencing, and retries remain out
 ## Automations and diagnostics
 
 `on_message` receives a `MeshMessage` with source, optional source name, destination, previous hop, payload, counter,
-hop count, TTL, RSSI, SNR, and broadcast/destination flags. `on_route_update` fires when observable Route state changes.
+hop count, TTL, RSSI, SNR, and broadcast/destination flags. `MeshMessage.payload` is a zero-copy
+`std::span<const uint8_t>` that is valid only during the callback. Copy it in the application callback if it must be
+retained. This is a breaking change from the former owning `std::string`; text consumers should use `payload.data()`
+with `payload.size()` as shown above. `on_route_update` fires when observable Route state changes.
 
 Optional diagnostics are connected by ID:
 
@@ -147,9 +151,10 @@ ID tie-break. `gateway_available_sensor_id` is true when this Node has Upstream 
 ## Public C++ interface
 
 ```cpp
-bool send_message(const std::string &destination, const std::string &payload);
-bool broadcast_message(const std::string &payload);
-bool send_to_gateway(const std::string &payload);
+bool send_message(const std::string &destination, std::span<const uint8_t> payload);
+bool broadcast_message(std::span<const uint8_t> payload);
+bool send_to_gateway(std::span<const uint8_t> payload);
+// Convenience overloads accepting const std::string & remain available.
 void set_upstream_connected(bool connected);
 bool is_upstream_connected() const;
 bool has_route(const std::string &node_id) const;
@@ -161,6 +166,11 @@ void clear_routes();
 std::string get_routing_table_json() const;
 size_t get_known_node_count() const;
 ```
+
+The byte-span overloads and fixed-capacity packet buffers do not allocate in the send path. Receive decryption uses a
+fixed stack buffer and exposes the callback-scoped payload span without allocating. Diagnostic string-returning
+helpers (`get_routing_table_json()`, `get_nearest_gateway()`, and the link-simulator blocklist formatter) retain
+owning strings because they run only on explicit diagnostic/configuration paths, not per-packet builders or dispatch.
 
 ## Protocol v4 security
 

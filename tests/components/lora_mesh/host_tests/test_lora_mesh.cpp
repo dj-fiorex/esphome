@@ -133,6 +133,28 @@ static void test_oversize_payload_truncated_consistently() {
   EXPECT_EQ(payload_len, 218u);
 }
 
+static void test_binary_span_send_does_not_allocate_and_round_trips() {
+  TestNode a("node-a");
+  const std::array<uint8_t, 5> payload{{0x00, 0x41, 0xFF, 0x42, 0x00}};
+
+  esphome::test_allocations_begin();
+  bool accepted = a.mesh.broadcast_message(std::span<const uint8_t>(payload));
+  size_t allocation_count = esphome::test_allocations_end();
+  EXPECT_TRUE(accepted);
+  EXPECT_EQ(allocation_count, 0u);
+
+  a.mesh.loop();
+  EXPECT_EQ(a.radio.sent.size(), 1u);
+  const auto &packet = a.radio.sent[0];
+  EXPECT_EQ(packet[HDR], payload.size());
+  uint8_t plaintext[esphome::lora_mesh::MESH_MAX_DATA_PAYLOAD_SIZE]{};
+  bool decrypted = esphome::lora_mesh::mesh_decrypt_payload(TEST_FABRIC_KEY, NODE_A, BROADCAST, get_u32_le(&packet[14]),
+                                                            PKT_DATA, packet[5], packet[HDR], &packet[HDR + 1],
+                                                            plaintext, &packet[HDR + 1 + packet[HDR]]);
+  EXPECT_TRUE(decrypted);
+  EXPECT_TRUE(memcmp(plaintext, payload.data(), payload.size()) == 0);
+}
+
 // ── Slice 2: HELLO at protocol v4 ───────────────────────────────────────────
 
 static void test_own_hello_has_v4_body_at_offset_28() {
@@ -1038,6 +1060,33 @@ static void test_same_fabric_key_decrypts_payload() {
   EXPECT_TRUE(b.received[0].payload == "secret-msg");
 }
 
+static void test_receive_dispatch_does_not_allocate() {
+  FakeRadio radio;
+  LoraMesh mesh(TEST_FABRIC_KEY_HEX);
+  mesh.set_radio(&radio);
+  mesh.set_node_id(esphome::TemplatableValue<std::string>("node-b"));
+
+  std::array<uint8_t, esphome::lora_mesh::MESH_MAX_DATA_PAYLOAD_SIZE> delivered{};
+  size_t delivered_size = 0;
+  mesh.add_on_message_callback([&](const esphome::lora_mesh::MeshMessage &message) {
+    delivered_size = message.payload.size();
+    memcpy(delivered.data(), message.payload.data(), delivered_size);
+  });
+  mesh.setup();
+  mesh.loop();
+
+  const std::string payload(64, 'x');
+  auto packet = make_data(FABRIC, NODE_A, NODE_B, NODE_B, payload, 10, 8, 0, NODE_A);
+
+  esphome::test_allocations_begin();
+  mesh.on_radio_packet(packet.data(), packet.size(), -60.0f, 8.0f);
+  size_t allocation_count = esphome::test_allocations_end();
+
+  EXPECT_EQ(allocation_count, 0u);
+  EXPECT_EQ(delivered_size, payload.size());
+  EXPECT_TRUE(memcmp(delivered.data(), payload.data(), payload.size()) == 0);
+}
+
 static void test_wrong_key_drops_packet() {
   static const uint8_t WRONG_KEY[FABRIC_KEY_SIZE] = {0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8,
                                                      0xF7, 0xF6, 0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0};
@@ -1157,6 +1206,7 @@ int main() {
   RUN_TEST(test_broadcast_data_has_v4_header);
   RUN_TEST(test_data_marks_origin_upstream_state);
   RUN_TEST(test_oversize_payload_truncated_consistently);
+  RUN_TEST(test_binary_span_send_does_not_allocate_and_round_trips);
   RUN_TEST(test_own_hello_has_v4_body_at_offset_28);
   RUN_TEST(test_hello_builds_direct_and_advertised_routes);
   RUN_TEST(test_protocol_v3_hello_is_rejected_without_route_state);
@@ -1203,6 +1253,7 @@ int main() {
   RUN_TEST(test_full_queue_drops_packet);
   // Fabric Key DATA security / replay tests
   RUN_TEST(test_same_fabric_key_decrypts_payload);
+  RUN_TEST(test_receive_dispatch_does_not_allocate);
   RUN_TEST(test_wrong_key_drops_packet);
   RUN_TEST(test_modified_data_does_not_reach_application_callback);
   RUN_TEST(test_modified_data_flags_do_not_reach_application_callback);

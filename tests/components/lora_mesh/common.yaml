@@ -27,7 +27,8 @@ lora_mesh:
   on_message:
     then:
       - lambda: |-
-          ESP_LOGI("mesh", "From %s: %s", x.source, x.payload.c_str());
+          ESP_LOGI("mesh", "From %s: %.*s", x.source, static_cast<int>(x.payload.size()),
+                   reinterpret_cast<const char *>(x.payload.data()));
 
   on_route_update:
     then:

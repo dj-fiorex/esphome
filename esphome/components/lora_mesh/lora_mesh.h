@@ -20,6 +20,7 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 #include <string>
 
 namespace esphome::lora_mesh {
@@ -60,9 +61,21 @@ class LoraMesh : public Component {
   void set_tx_jitter(uint32_t ms) { this->tx_jitter_ms_ = ms; }
 
   // ── Public API (callable from C++ lambdas / actions) ─────────────────
-  bool send_message(const std::string &destination, const std::string &payload);
-  bool broadcast_message(const std::string &payload);
-  bool send_to_gateway(const std::string &payload);
+  bool send_message(const std::string &destination, std::span<const uint8_t> payload);
+  bool broadcast_message(std::span<const uint8_t> payload);
+  bool send_to_gateway(std::span<const uint8_t> payload);
+  bool send_message(const std::string &destination, const std::string &payload) {
+    return this->send_message(
+        destination, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(payload.data()), payload.size()));
+  }
+  bool broadcast_message(const std::string &payload) {
+    return this->broadcast_message(
+        std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(payload.data()), payload.size()));
+  }
+  bool send_to_gateway(const std::string &payload) {
+    return this->send_to_gateway(
+        std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(payload.data()), payload.size()));
+  }
   void set_upstream_connected(bool connected);
   bool has_route(const std::string &node_id) const;
   bool has_gateway() const;
@@ -121,7 +134,7 @@ class LoraMesh : public Component {
   Packet build_header_(PacketType type, uint8_t flags, uint32_t dst_id, uint32_t frame_counter, uint8_t ttl,
                        uint8_t hop_count, uint32_t prev_hop, uint32_t next_hop) const;
   Packet build_hello_packet_();
-  Packet build_data_packet_(uint32_t dst_id, uint32_t next_hop, const std::string &payload);
+  Packet build_data_packet_(uint32_t dst_id, uint32_t next_hop, std::span<const uint8_t> payload);
   bool validate_hello_packet_(const uint8_t *pkt, size_t pkt_len) const;
   bool validate_data_envelope_(const uint8_t *pkt, size_t pkt_len, uint32_t dst_id, uint8_t flags) const;
 
