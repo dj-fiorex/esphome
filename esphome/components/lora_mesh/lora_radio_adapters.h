@@ -21,27 +21,13 @@ template<typename RadioError> TransmissionOutcome to_transmission_outcome(RadioE
   return TransmissionOutcome::INVALID_PARAMETER;
 }
 
-}  // namespace esphome::lora_mesh::detail
-
-#ifdef LORA_MESH_USE_SX126X
-#include "esphome/components/sx126x/sx126x.h"
-
-namespace esphome::lora_mesh {
-
-/**
- * Thin adapter that bridges SX126x ↔ LoraMesh.
- *
- * Registers itself as an SX126xListener so it receives every packet from the
- * radio's loop()-level dispatcher, then forwards it to LoraMesh::on_radio_packet().
- */
-class LoRaSX126xRadio : public LoRaRadio, public sx126x::SX126xListener {
+/** Shared implementation for the two concrete ESPHome radio adapters. */
+template<typename Radio, typename Listener> class LoRaRadioAdapter : public LoRaRadio, public Listener {
  public:
-  explicit LoRaSX126xRadio(sx126x::SX126x *radio) : radio_(radio) {}
-
   TransmissionOutcome transmit_packet(const Packet &data) override {
-    // Convert the stack-allocated Packet to the vector the sx126x API expects.
-    std::vector<uint8_t> vec(data.begin(), data.end());
-    return detail::to_transmission_outcome(this->radio_->transmit_packet(vec));
+    // The mesh owns fixed-capacity packets; both ESPHome radio APIs currently accept vectors.
+    this->transmit_buffer_.assign(data.begin(), data.end());
+    return to_transmission_outcome(this->radio_->transmit_packet(this->transmit_buffer_));
   }
 
   size_t get_max_packet_size() override { return this->radio_->get_max_packet_size(); }
@@ -58,8 +44,32 @@ class LoRaSX126xRadio : public LoRaRadio, public sx126x::SX126xListener {
   }
 
  protected:
-  sx126x::SX126x *radio_;
+  explicit LoRaRadioAdapter(Radio *radio) : radio_(radio) {
+    // Allocate the driver's vector storage during construction, never on the packet hot path.
+    this->transmit_buffer_.reserve(LORA_MAX_PACKET_SIZE);
+  }
+
+  Radio *radio_;
   LoraMesh *mesh_{nullptr};
+  std::vector<uint8_t> transmit_buffer_;
+};
+
+}  // namespace esphome::lora_mesh::detail
+
+#ifdef LORA_MESH_USE_SX126X
+#include "esphome/components/sx126x/sx126x.h"
+
+namespace esphome::lora_mesh {
+
+/**
+ * Thin adapter that bridges SX126x ↔ LoraMesh.
+ *
+ * Registers itself as an SX126xListener so it receives every packet from the
+ * radio's loop()-level dispatcher, then forwards it to LoraMesh::on_radio_packet().
+ */
+class LoRaSX126xRadio final : public detail::LoRaRadioAdapter<sx126x::SX126x, sx126x::SX126xListener> {
+ public:
+  explicit LoRaSX126xRadio(sx126x::SX126x *radio) : LoRaRadioAdapter(radio) {}
 };
 
 }  // namespace esphome::lora_mesh
@@ -75,32 +85,9 @@ namespace esphome::lora_mesh {
 /**
  * Thin adapter that bridges SX127x ↔ LoraMesh.
  */
-class LoRaSX127xRadio : public LoRaRadio, public sx127x::SX127xListener {
+class LoRaSX127xRadio final : public detail::LoRaRadioAdapter<sx127x::SX127x, sx127x::SX127xListener> {
  public:
-  explicit LoRaSX127xRadio(sx127x::SX127x *radio) : radio_(radio) {}
-
-  TransmissionOutcome transmit_packet(const Packet &data) override {
-    // Convert the stack-allocated Packet to the vector the sx127x API expects.
-    std::vector<uint8_t> vec(data.begin(), data.end());
-    return detail::to_transmission_outcome(this->radio_->transmit_packet(vec));
-  }
-
-  size_t get_max_packet_size() override { return this->radio_->get_max_packet_size(); }
-
-  void attach_listener(LoraMesh *mesh) override {
-    this->mesh_ = mesh;
-    this->radio_->register_listener(this);
-  }
-
-  void on_packet(const std::vector<uint8_t> &packet, float rssi, float snr) override {
-    if (this->mesh_ != nullptr) {
-      this->mesh_->on_radio_packet(packet.data(), packet.size(), rssi, snr);
-    }
-  }
-
- protected:
-  sx127x::SX127x *radio_;
-  LoraMesh *mesh_{nullptr};
+  explicit LoRaSX127xRadio(sx127x::SX127x *radio) : LoRaRadioAdapter(radio) {}
 };
 
 }  // namespace esphome::lora_mesh
