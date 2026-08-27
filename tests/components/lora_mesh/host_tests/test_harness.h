@@ -24,6 +24,10 @@ void test_clock_set(uint32_t ms);
 void test_clock_advance(uint32_t ms);
 void test_random_set(uint32_t v);
 void test_preferences_clear();
+void test_preferences_put_u32(uint32_t key, uint32_t value);
+uint32_t test_preferences_get_u32(uint32_t key);
+void test_log_clear();
+bool test_log_contains(const char *text);
 void test_allocations_begin();
 size_t test_allocations_end();
 }  // namespace esphome

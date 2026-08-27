@@ -2,6 +2,8 @@
 
 #include "test_harness.h"
 
+#include <limits>
+
 int g_failures = 0;
 
 using namespace lmtest;
@@ -1441,6 +1443,44 @@ static void test_frame_counter_persists_across_reboot() {
   }
 }
 
+static void test_final_frame_counter_is_reserved_and_used_only_once() {
+  constexpr uint32_t max_counter = std::numeric_limits<uint32_t>::max();
+  const uint32_t preference_key = fnv1a_str("lora_mesh_fc_node-a");
+  esphome::test_preferences_put_u32(preference_key, max_counter - 2);
+
+  TestNode a("node-a");
+  EXPECT_EQ(esphome::test_preferences_get_u32(preference_key), max_counter);
+
+  EXPECT_TRUE(a.mesh.broadcast_message("final"));
+  a.mesh.loop();
+  EXPECT_EQ(a.radio.sent.size(), 1u);
+  EXPECT_EQ(get_u32_le(&a.radio.sent[0][14]), max_counter);
+
+  EXPECT_FALSE(a.mesh.broadcast_message("exhausted"));
+  a.mesh.loop();
+  EXPECT_EQ(a.radio.sent.size(), 1u);
+}
+
+static void test_reboot_at_frame_counter_exhaustion_refuses_all_data_sends() {
+  constexpr uint32_t max_counter = std::numeric_limits<uint32_t>::max();
+  const uint32_t preference_key = fnv1a_str("lora_mesh_fc_node-a");
+  esphome::test_preferences_put_u32(preference_key, max_counter);
+
+  TestNode rebooted("node-a");
+  rebooted.receive(make_hello(FABRIC, NODE_B, "node-b", {}, FLAG_GATEWAY));
+  esphome::test_log_clear();
+
+  EXPECT_FALSE(rebooted.mesh.broadcast_message("broadcast"));
+  EXPECT_FALSE(rebooted.mesh.send_message("node-b", "unicast"));
+  EXPECT_FALSE(rebooted.mesh.send_to_gateway("gateway"));
+  EXPECT_TRUE(esphome::test_log_contains("Frame counter exhausted"));
+  EXPECT_TRUE(esphome::test_log_contains("prevent nonce reuse"));
+  EXPECT_EQ(esphome::test_preferences_get_u32(preference_key), max_counter);
+
+  rebooted.mesh.loop();
+  EXPECT_EQ(rebooted.radio.sent.size(), 0u);
+}
+
 int main() {
   RUN_TEST(test_protocol_v4_derives_fabric_id_and_uses_eight_byte_data_tag);
   RUN_TEST(test_broadcast_data_has_v4_header);
@@ -1512,6 +1552,8 @@ int main() {
   RUN_TEST(test_protocol_v3_four_byte_data_tag_is_not_forwarded);
   RUN_TEST(test_replay_rejected);
   RUN_TEST(test_frame_counter_persists_across_reboot);
+  RUN_TEST(test_final_frame_counter_is_reserved_and_used_only_once);
+  RUN_TEST(test_reboot_at_frame_counter_exhaustion_refuses_all_data_sends);
   printf("\n%s (%d failure%s)\n", g_failures == 0 ? "OK" : "FAILED", g_failures, g_failures == 1 ? "" : "s");
   return g_failures == 0 ? 0 : 1;
 }

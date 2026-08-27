@@ -196,7 +196,7 @@ class LoraMesh : public Component {
     return {reinterpret_cast<const uint8_t *>(payload.data()), payload.size()};
   }
   static void id_to_hex(uint32_t id, char out[9]);
-  uint32_t next_frame_counter_();
+  bool next_frame_counter_(uint32_t &frame_counter);
 
   // ── Frame counter persistence ─────────────────────────────────────────
   void persist_frame_counter_();

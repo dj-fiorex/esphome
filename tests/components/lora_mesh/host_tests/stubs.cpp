@@ -5,11 +5,14 @@
 #include "esphome/core/component.h"
 #include "esphome/core/preferences.h"
 
+#include <cstdarg>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <new>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -48,6 +51,7 @@ namespace esphome {
 namespace {
 uint32_t g_fake_millis = 1000;
 uint32_t g_fake_random = 0;
+std::string g_log_messages;
 }  // namespace
 
 void test_clock_set(uint32_t ms) { g_fake_millis = ms; }
@@ -80,6 +84,20 @@ void *callback_manager_grow(void *data, uint16_t size, uint16_t &capacity, size_
 // Deterministic: defaults to 0 (no HELLO stagger, no TX backoff); tests can
 // override via test_random_set().
 uint32_t random_uint32() { return g_fake_random; }
+
+void esp_log_printf_(int, const char *, int, const char *format, ...) {
+  char message[256];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(message, sizeof(message), format, args);
+  va_end(args);
+  g_log_messages += message;
+  g_log_messages += '\n';
+}
+
+void test_log_clear() { g_log_messages.clear(); }
+
+bool test_log_contains(const char *text) { return g_log_messages.find(text) != std::string::npos; }
 
 void get_mac_address_raw(uint8_t *mac) {
   static const uint8_t FAKE_MAC[6] = {0x02, 0x00, 0x00, 0xAB, 0xCD, 0xEF};
@@ -151,5 +169,19 @@ ESPPreferences *global_preferences = &g_fake_prefs;  // NOLINT
 
 // Test helper: clear all persisted preferences (for test isolation).
 void test_preferences_clear() { g_pref_store.clear(); }
+
+void test_preferences_put_u32(uint32_t key, uint32_t value) {
+  const auto *bytes = reinterpret_cast<const uint8_t *>(&value);
+  g_pref_store[key].assign(bytes, bytes + sizeof(value));
+}
+
+uint32_t test_preferences_get_u32(uint32_t key) {
+  uint32_t value = 0;
+  auto it = g_pref_store.find(key);
+  if (it != g_pref_store.end() && it->second.size() == sizeof(value)) {
+    memcpy(&value, it->second.data(), sizeof(value));
+  }
+  return value;
+}
 
 }  // namespace esphome

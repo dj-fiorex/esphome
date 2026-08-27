@@ -7,6 +7,7 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 namespace esphome::lora_mesh {
 
@@ -676,8 +677,12 @@ Packet LoraMesh::build_hello_packet_() {
   }
 
   // HELLO is single-hop: next_hop is broadcast but receivers never forward it.
-  auto pkt = this->build_header_(PacketType::HELLO, flags, MESH_BROADCAST_ID, this->next_frame_counter_(),
-                                 this->max_hops_, 0, this->node_id_, MESH_BROADCAST_ID);
+  uint32_t frame_counter;
+  if (!this->next_frame_counter_(frame_counter)) {
+    return {};
+  }
+  auto pkt = this->build_header_(PacketType::HELLO, flags, MESH_BROADCAST_ID, frame_counter, this->max_hops_, 0,
+                                 this->node_id_, MESH_BROADCAST_ID);
   pkt.push_back(MESH_PROTO_VERSION);
   pkt.push_back(static_cast<uint8_t>(name_len));
   for (size_t i = 0; i < name_len; ++i) {
@@ -711,8 +716,12 @@ Packet LoraMesh::build_data_packet_(uint32_t dst_id, uint32_t next_hop, std::spa
   if (dst_id == MESH_BROADCAST_ID) {
     flags |= FLAG_IS_BROADCAST;
   }
-  uint32_t fc = this->next_frame_counter_();
-  auto pkt = this->build_header_(PacketType::DATA, flags, dst_id, fc, this->max_hops_, 0, this->node_id_, next_hop);
+  uint32_t frame_counter;
+  if (!this->next_frame_counter_(frame_counter)) {
+    return {};
+  }
+  auto pkt =
+      this->build_header_(PacketType::DATA, flags, dst_id, frame_counter, this->max_hops_, 0, this->node_id_, next_hop);
   // Budget = radio frame limit minus header, payload_len byte, and authentication tag.
   size_t max_pkt = (this->radio_ != nullptr) ? this->radio_->get_max_packet_size() : LORA_MAX_PACKET_SIZE;
   max_pkt = std::min(max_pkt, LORA_MAX_PACKET_SIZE);
@@ -725,9 +734,9 @@ Packet LoraMesh::build_data_packet_(uint32_t dst_id, uint32_t next_hop, std::spa
 
   uint8_t ciphertext[MESH_MAX_DATA_PAYLOAD_SIZE];
   uint8_t tag[DATA_AUTH_TAG_SIZE];
-  bool encrypted =
-      mesh_encrypt_payload(this->fabric_key_.data(), this->node_id_, dst_id, fc, static_cast<uint8_t>(PacketType::DATA),
-                           flags, static_cast<uint8_t>(len), payload.data(), ciphertext, tag);
+  bool encrypted = mesh_encrypt_payload(this->fabric_key_.data(), this->node_id_, dst_id, frame_counter,
+                                        static_cast<uint8_t>(PacketType::DATA), flags, static_cast<uint8_t>(len),
+                                        payload.data(), ciphertext, tag);
   if (!encrypted) {
     ESP_LOGE(TAG, "Failed to encrypt DATA packet");
     return {};
@@ -783,6 +792,9 @@ void LoraMesh::queue_pending_hello_(uint32_t now) {
     return;
   }
   auto pkt = this->build_hello_packet_();
+  if (pkt.empty()) {
+    return;
+  }
   if (this->enqueue_tx_(pkt)) {
     this->acknowledge_advertised_gateway_updates_(pkt);
     this->hello_update_pending_ = this->has_pending_gateway_updates_();
@@ -1075,18 +1087,24 @@ void LoraMesh::publish_diagnostics_() {
 
 // ─── Frame counter persistence ────────────────────────────────────────────────
 
-uint32_t LoraMesh::next_frame_counter_() {
+bool LoraMesh::next_frame_counter_(uint32_t &frame_counter) {
+  if (this->frame_counter_ == std::numeric_limits<uint32_t>::max()) {
+    ESP_LOGE(TAG, "Frame counter exhausted; refusing to originate another packet to prevent nonce reuse");
+    return false;
+  }
   ++this->frame_counter_;
   // Persist to NVS when we exceed the batch threshold.
   if (this->frame_counter_ >= this->frame_counter_persist_threshold_) {
     this->persist_frame_counter_();
   }
-  return this->frame_counter_;
+  frame_counter = this->frame_counter_;
+  return true;
 }
 
 void LoraMesh::persist_frame_counter_() {
   // Write ahead by FRAME_COUNTER_BATCH so on next boot we resume from a safe value.
-  uint32_t persisted_val = this->frame_counter_ + FRAME_COUNTER_BATCH;
+  uint32_t remaining = std::numeric_limits<uint32_t>::max() - this->frame_counter_;
+  uint32_t persisted_val = this->frame_counter_ + std::min(FRAME_COUNTER_BATCH, remaining);
   this->frame_counter_pref_.save(&persisted_val);
   this->frame_counter_persist_threshold_ = persisted_val;
   ESP_LOGD(TAG, "Frame counter persisted (next_boot=%" PRIu32 ")", persisted_val);
@@ -1104,10 +1122,8 @@ void LoraMesh::load_frame_counter_() {
   } else {
     this->frame_counter_ = 0;
   }
-  // Set threshold so next persist happens after FRAME_COUNTER_BATCH more frames.
-  this->frame_counter_persist_threshold_ = this->frame_counter_ + FRAME_COUNTER_BATCH;
   // Persist immediately so if we crash before the first batch completes,
-  // next boot still has a safe-ahead value.
+  // next boot still has a safe-ahead value. This also sets the next threshold.
   this->persist_frame_counter_();
 }
 
