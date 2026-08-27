@@ -221,7 +221,7 @@ std::string LoraMesh::get_nearest_gateway() const {
     return {};
   }
   char buf[9];
-  id_to_hex(gw->dst_id, buf);
+  LoraMesh::id_to_hex(gw->dst_id, buf);
   return buf;
 }
 
@@ -263,8 +263,8 @@ std::string LoraMesh::get_routing_table_json() const {
     // Buffer: base JSON structure (~96 bytes) + "name" field (up to MESH_NODE_NAME_MAX_LEN=32) + safety margin.
     char buf[160];
     char dst_hex[9], nh_hex[9];
-    id_to_hex(r.dst_id, dst_hex);
-    id_to_hex(r.next_hop_id, nh_hex);
+    LoraMesh::id_to_hex(r.dst_id, dst_hex);
+    LoraMesh::id_to_hex(r.next_hop_id, nh_hex);
     const char *name = this->lookup_node_name_(r.dst_id);
     snprintf(buf, sizeof(buf), R"({"dst":"%s","name":"%s","nh":"%s","hops":%u,"gw":%s,"rssi":%.0f})", dst_hex,
              name != nullptr ? name : "", nh_hex, r.hop_count, r.is_gateway ? "true" : "false",
@@ -321,7 +321,7 @@ std::string LoraMesh::get_blocked_neighbors_str() const {
       out += name;
     } else {
       char hex[9];
-      id_to_hex(this->blocked_neighbors_[i], hex);
+      LoraMesh::id_to_hex(this->blocked_neighbors_[i], hex);
       out += hex;
     }
   }
@@ -576,13 +576,13 @@ void LoraMesh::process_data_(const uint8_t *pkt, size_t pkt_len, size_t offset, 
       this->update_replay_counter_(src_id, frame_counter);
 
       MeshMessage msg;
-      id_to_hex(src_id, msg.source);
+      LoraMesh::id_to_hex(src_id, msg.source);
       const char *src_name = this->lookup_node_name_(src_id);
       if (src_name != nullptr) {
         snprintf(msg.source_name, sizeof(msg.source_name), "%s", src_name);
       }
-      id_to_hex(dst_id, msg.destination);
-      id_to_hex(prev_hop, msg.prev_hop);
+      LoraMesh::id_to_hex(dst_id, msg.destination);
+      LoraMesh::id_to_hex(prev_hop, msg.prev_hop);
       msg.payload.assign(reinterpret_cast<const char *>(plaintext), payload_len);
       msg.frame_counter = frame_counter;
       msg.hop_count = hop_count;
