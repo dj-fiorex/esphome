@@ -2,8 +2,8 @@
 
 namespace esphome::lora_mesh {
 
-PacketAdmissionResult PacketAdmission::admit(std::span<const uint8_t> packet) const {
-  PacketAdmissionResult result;
+PacketInspectionResult PacketAdmission::inspect(std::span<const uint8_t> packet) const {
+  PacketInspectionResult result;
   if (packet.size() < MESH_HEADER_SIZE) {
     return result;
   }
@@ -13,24 +13,31 @@ PacketAdmissionResult PacketAdmission::admit(std::span<const uint8_t> packet) co
     result.failure = AdmissionFailure::FABRIC_MISMATCH;
     return result;
   }
+  result.failure = AdmissionFailure::NONE;
+  return result;
+}
 
-  switch (result.header.packet_type) {
+PacketAdmissionResult PacketAdmission::authenticate(std::span<const uint8_t> packet, const PacketHeader &header) const {
+  PacketAdmissionResult result;
+  result.header = header;
+
+  switch (header.packet_type) {
     case PacketType::HELLO:
-      if (!this->validate_hello_(result.header, packet)) {
+      if (!this->validate_hello_(header, packet)) {
         result.failure = AdmissionFailure::INVALID_HELLO;
         return result;
       }
       break;
     case PacketType::DATA: {
-      if (!PacketAdmission::validate_data_envelope_(result.header, packet)) {
+      if (!PacketAdmission::validate_data_envelope_(header, packet)) {
         result.failure = AdmissionFailure::INVALID_DATA_ENVELOPE;
         return result;
       }
       uint8_t payload_size = packet[MESH_HEADER_SIZE];
-      if (!mesh_decrypt_payload(this->fabric_key_, result.header.src_id, result.header.dst_id,
-                                result.header.frame_counter, static_cast<uint8_t>(result.header.packet_type),
-                                result.header.flags, payload_size, packet.data() + MESH_HEADER_SIZE + 1,
-                                result.plaintext.data(), packet.data() + MESH_HEADER_SIZE + 1 + payload_size)) {
+      if (!mesh_decrypt_payload(this->fabric_key_, header.src_id, header.dst_id, header.frame_counter,
+                                static_cast<uint8_t>(header.packet_type), header.flags, payload_size,
+                                packet.data() + MESH_HEADER_SIZE + 1, result.plaintext.data(),
+                                packet.data() + MESH_HEADER_SIZE + 1 + payload_size)) {
         result.failure = AdmissionFailure::DATA_AUTHENTICATION_FAILED;
         return result;
       }

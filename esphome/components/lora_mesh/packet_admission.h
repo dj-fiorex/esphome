@@ -30,13 +30,21 @@ struct PacketAdmissionResult {
   std::span<const uint8_t> plaintext_view() const { return {this->plaintext.data(), this->plaintext_size}; }
 };
 
+struct PacketInspectionResult {
+  AdmissionFailure failure{AdmissionFailure::PACKET_TOO_SHORT};
+  PacketHeader header{};
+
+  bool accepted() const { return this->failure == AdmissionFailure::NONE; }
+};
+
 class PacketAdmission {
  public:
   PacketAdmission(const uint32_t &fabric_id, const std::array<uint8_t, FABRIC_KEY_SIZE> &fabric_key,
                   const std::array<uint8_t, CONTROL_PLANE_KEY_SIZE> &control_plane_key)
       : fabric_id_(&fabric_id), fabric_key_(fabric_key.data()), control_plane_key_(control_plane_key.data()) {}
 
-  PacketAdmissionResult admit(std::span<const uint8_t> packet) const;
+  PacketInspectionResult inspect(std::span<const uint8_t> packet) const;
+  PacketAdmissionResult authenticate(std::span<const uint8_t> packet, const PacketHeader &header) const;
 
  private:
   bool validate_hello_(const PacketHeader &header, std::span<const uint8_t> packet) const;

@@ -22,10 +22,12 @@ module therefore concentrates real complexity rather than passing calls through.
 
 After the Route slice established the pattern, two more in-process modules complete issue #38:
 
-- `PacketAdmission` accepts raw packet bytes and returns either one named failure or an authenticated protocol-v4
-  header plus decrypted DATA plaintext. It owns header parsing, exact HELLO/DATA shape validation, HELLO HMAC
-  verification, and DATA CCM authentication, so admission ordering cannot diverge among local delivery, broadcast,
-  and Forwarding. Deleting it would redistribute security-critical parsing and authentication into the dispatcher.
+- `PacketAdmission` first inspects raw bytes through the header/Fabric gate, then authenticates the inspected frame and
+  returns either one named failure or decrypted DATA plaintext. The staged interface preserves the pre-existing
+  link-simulation and self-echo checkpoints without parsing the header twice. It owns header parsing, exact HELLO/DATA
+  shape validation, HELLO HMAC verification, and DATA CCM authentication, so admission ordering cannot diverge among
+  local delivery, broadcast, and Forwarding. Deleting it would redistribute security-critical parsing and
+  authentication into the dispatcher.
 - `OutboundAirtime` accepts completed packets and owns the fixed-capacity FIFO, per-head random jitter, at-most-one
   attempt per loop, radio outcome handling, failure drop policy, and just-in-time refresh of stale queued HELLOs. Its
   fixed function hooks let `LoraMesh` build and acknowledge HELLO content without adding a second radio adapter or

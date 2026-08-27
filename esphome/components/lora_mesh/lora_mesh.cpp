@@ -325,33 +325,26 @@ std::string LoraMesh::get_blocked_neighbors_str() const {
 
 void LoraMesh::on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, float snr) {
   const std::span<const uint8_t> packet(pkt, pkt_len);
-  PacketAdmissionResult admission = this->packet_admission_.admit(packet);
-  if (!admission.accepted()) {
-    switch (admission.failure) {
+  PacketInspectionResult inspection = this->packet_admission_.inspect(packet);
+  if (!inspection.accepted()) {
+    switch (inspection.failure) {
       case AdmissionFailure::PACKET_TOO_SHORT:
         ESP_LOGW(TAG, "Packet too short (%zu bytes), dropped", pkt_len);
         break;
       case AdmissionFailure::FABRIC_MISMATCH:
-        ESP_LOGV(TAG, "Fabric ID mismatch (0x%08" PRIX32 " vs 0x%08" PRIX32 "), dropped", admission.header.fabric_id,
+        ESP_LOGV(TAG, "Fabric ID mismatch (0x%08" PRIX32 " vs 0x%08" PRIX32 "), dropped", inspection.header.fabric_id,
                  this->fabric_id_);
         break;
       case AdmissionFailure::UNSUPPORTED_TYPE:
-        ESP_LOGD(TAG, "Unhandled packet type %u from 0x%08" PRIX32, static_cast<uint8_t>(admission.header.packet_type),
-                 admission.header.src_id);
-        break;
       case AdmissionFailure::INVALID_HELLO:
-        ESP_LOGD(TAG, "HELLO from 0x%08" PRIX32 " failed validation or authentication", admission.header.src_id);
-        break;
-      case AdmissionFailure::DATA_AUTHENTICATION_FAILED:
-        ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " authentication failed, dropped", admission.header.src_id);
-        break;
       case AdmissionFailure::INVALID_DATA_ENVELOPE:
+      case AdmissionFailure::DATA_AUTHENTICATION_FAILED:
       case AdmissionFailure::NONE:
         break;
     }
     return;
   }
-  const PacketHeader &header = admission.header;
+  const PacketHeader &header = inspection.header;
 
 #ifdef LORA_MESH_LINK_SIM
   // Link simulator: pretend this packet was never received because its
@@ -365,6 +358,28 @@ void LoraMesh::on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, f
 
   // Ignore our own transmissions echoed back.
   if (header.src_id == this->node_id_) {
+    return;
+  }
+
+  PacketAdmissionResult admission = this->packet_admission_.authenticate(packet, header);
+  if (!admission.accepted()) {
+    switch (admission.failure) {
+      case AdmissionFailure::UNSUPPORTED_TYPE:
+        ESP_LOGD(TAG, "Unhandled packet type %u from 0x%08" PRIX32, static_cast<uint8_t>(header.packet_type),
+                 header.src_id);
+        break;
+      case AdmissionFailure::INVALID_HELLO:
+        ESP_LOGD(TAG, "HELLO from 0x%08" PRIX32 " failed validation or authentication", header.src_id);
+        break;
+      case AdmissionFailure::DATA_AUTHENTICATION_FAILED:
+        ESP_LOGD(TAG, "DATA from 0x%08" PRIX32 " authentication failed, dropped", header.src_id);
+        break;
+      case AdmissionFailure::PACKET_TOO_SHORT:
+      case AdmissionFailure::FABRIC_MISMATCH:
+      case AdmissionFailure::INVALID_DATA_ENVELOPE:
+      case AdmissionFailure::NONE:
+        break;
+    }
     return;
   }
 

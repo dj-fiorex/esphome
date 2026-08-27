@@ -30,8 +30,10 @@ static void test_authentic_data_is_admitted_with_plaintext() {
   PacketAdmission admission = make_admission();
   auto packet = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "water", 7);
 
-  auto result = admission.admit(packet);
+  auto inspection = admission.inspect(packet);
+  auto result = admission.authenticate(packet, inspection.header);
 
+  EXPECT_TRUE(inspection.accepted());
   EXPECT_TRUE(result.accepted());
   EXPECT_EQ(result.header.src_id, NODE_A);
   EXPECT_EQ(result.header.dst_id, NODE_B);
@@ -44,8 +46,10 @@ static void test_tampered_data_is_rejected_before_plaintext_admission() {
   auto packet = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "water", 7);
   packet.back() ^= 0x80;
 
-  auto result = admission.admit(packet);
+  auto inspection = admission.inspect(packet);
+  auto result = admission.authenticate(packet, inspection.header);
 
+  EXPECT_TRUE(inspection.accepted());
   EXPECT_FALSE(result.accepted());
   EXPECT_EQ(result.failure, AdmissionFailure::DATA_AUTHENTICATION_FAILED);
   EXPECT_EQ(result.plaintext_size, 0u);
@@ -55,8 +59,10 @@ static void test_authenticated_hello_with_invalid_route_shape_is_rejected() {
   PacketAdmission admission = make_admission();
   auto packet = make_hello(FABRIC, NODE_A, "node-a", {{NODE_B, 255, -70, false}}, 0, 8);
 
-  auto result = admission.admit(packet);
+  auto inspection = admission.inspect(packet);
+  auto result = admission.authenticate(packet, inspection.header);
 
+  EXPECT_TRUE(inspection.accepted());
   EXPECT_FALSE(result.accepted());
   EXPECT_EQ(result.failure, AdmissionFailure::INVALID_HELLO);
 }

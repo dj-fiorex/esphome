@@ -30,4 +30,5 @@ which verify config validation and that the component builds for real targets.
 
 `test_route_table.cpp`, `test_packet_admission.cpp`, and `test_outbound_airtime.cpp`
 add focused coverage at the internal seams documented by ADR-0012. The public
-behavior cases remain in `test_lora_mesh.cpp`.
+behavior cases remain in `test_lora_mesh.cpp`; `test_link_sim_admission.cpp`
+checks the staged admission ordering through the public link-simulation API.
