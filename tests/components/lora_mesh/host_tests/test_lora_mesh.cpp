@@ -801,12 +801,36 @@ static void test_gateway_promotion_and_withdrawal_propagate_promptly_and_select_
   expect_nearest_gateway(offline_node, NODE_D);
 }
 
+static void test_gateway_withdrawal_from_worse_path_clears_stale_gateway_eligibility() {
+  TestNode offline_node("node-a");
+
+  // A learned C directly while D is its weaker alternative Gateway.
+  offline_node.receive(make_hello(FABRIC, NODE_C, "node-c", {}, FLAG_GATEWAY, 70), -50.0f);
+  offline_node.receive(make_hello(FABRIC, NODE_D, "node-d", {}, FLAG_GATEWAY, 80), -90.0f);
+  expect_nearest_gateway(offline_node, NODE_C);
+  advance_and_loop(offline_node, 1000);
+  offline_node.radio.sent.clear();
+
+  // A misses C's direct Withdrawal but hears it propagated by B. Gateway
+  // eligibility is destination state, so the worse two-hop path must still
+  // clear C's stale status without replacing C's better Route through C.
+  offline_node.receive(make_hello(FABRIC, NODE_B, "node-b", {{NODE_C, 1, -70, false}}, 0, 90), -60.0f);
+  expect_nearest_gateway(offline_node, NODE_D);
+
+  advance_and_loop(offline_node, 1000);
+  EXPECT_EQ(offline_node.radio.sent.size(), 1u);
+  if (offline_node.radio.sent.empty()) {
+    return;
+  }
+  EXPECT_TRUE(hello_advertises_gateway_state(offline_node.radio.sent[0], NODE_C, false));
+}
+
 static void test_gateway_change_is_included_when_hello_cannot_fit_every_route() {
   TestNode forwarding_node("node-b");
   forwarding_node.radio.max_packet_size = 52;  // node-b HELLO overhead plus exactly one Route
 
   // The close non-Gateway route would normally win the hop-count ordering.
-  // The farther Gateway change must instead occupy the sole advertisement.
+  // The farther Gateway change must instead occupy the sole Route entry in the HELLO.
   forwarding_node.receive(make_hello(FABRIC, NODE_C, "node-c", {{NODE_D, 2, -80, true}}, 0, 90), -60.0f);
   advance_and_loop(forwarding_node, 1000);
 
@@ -1303,6 +1327,7 @@ int main() {
   RUN_TEST(test_rejected_gateway_send_is_not_retried_after_queue_drains);
   RUN_TEST(test_three_node_gateway_discovery_and_delivery);
   RUN_TEST(test_gateway_promotion_and_withdrawal_propagate_promptly_and_select_alternative);
+  RUN_TEST(test_gateway_withdrawal_from_worse_path_clears_stale_gateway_eligibility);
   RUN_TEST(test_gateway_change_is_included_when_hello_cannot_fit_every_route);
   RUN_TEST(test_gateway_changes_over_hello_capacity_continue_in_bounded_updates);
   RUN_TEST(test_pending_gateway_withdrawal_survives_route_table_pressure);

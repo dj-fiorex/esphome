@@ -524,7 +524,7 @@ void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset,
       continue;
     }
     float path_rssi = std::min(advertised_rssi, rssi);
-    const RouteEntry *existing = this->find_route_(adv_dst);
+    RouteEntry *existing = this->find_route_(adv_dst);
     // Accept a strictly better path from anyone; renew the lease when our
     // current next hop re-confirms the route at equal quality (ADR 0002) —
     // otherwise stable multi-hop routes expire and flap every route_ttl.
@@ -533,6 +533,11 @@ void LoraMesh::process_hello_(const uint8_t *pkt, size_t pkt_len, size_t offset,
     bool reconfirmed = existing != nullptr && existing->next_hop_id == src_id && new_hops == existing->hop_count;
     if (better || reconfirmed) {
       this->update_route_(adv_dst, src_id, static_cast<uint8_t>(new_hops), advertised_gateway, path_rssi, snr);
+    } else if (existing != nullptr && this->update_gateway_state_(existing, advertised_gateway)) {
+      // Gateway eligibility belongs to the destination, not to one path. A
+      // promotion or Withdrawal arriving over a worse Route must propagate
+      // without replacing or renewing the currently preferred Route.
+      this->notify_route_changed_();
     }
   }
 
@@ -880,11 +885,20 @@ RouteEntry *LoraMesh::alloc_route_slot_() {
   return worst;
 }
 
+bool LoraMesh::update_gateway_state_(RouteEntry *route, bool is_gateway) {
+  if (route->is_gateway == is_gateway) {
+    return false;
+  }
+  route->is_gateway = is_gateway;
+  route->gateway_update_pending = true;
+  this->schedule_hello_update_();
+  return true;
+}
+
 void LoraMesh::update_route_(uint32_t dst_id, uint32_t next_hop, uint8_t hops, bool is_gw, float rssi, float snr) {
   uint32_t now = millis();
   RouteEntry *r = this->find_route_(dst_id);
   bool changed = false;
-  bool gateway_changed = false;
   if (r == nullptr) {
     r = this->alloc_route_slot_();
     if (r == nullptr) {
@@ -905,20 +919,14 @@ void LoraMesh::update_route_(uint32_t dst_id, uint32_t next_hop, uint8_t hops, b
   // becomes a gateway after we first learned it as a plain neighbour). Refresh the
   // flag on every confirmation, otherwise a stale is_gateway=false hides a gateway
   // that re-advertises at equal quality and send_to_gateway() finds no route.
-  if (r->is_gateway != is_gw) {
-    r->is_gateway = is_gw;
-    r->gateway_update_pending = true;
+  if (this->update_gateway_state_(r, is_gw)) {
     changed = true;
-    gateway_changed = true;
   }
   r->is_valid = true;
   r->last_seen = now;
   r->expires_at = now + this->route_ttl_ms_;
   if (changed) {
     this->notify_route_changed_();
-  }
-  if (gateway_changed) {
-    this->schedule_hello_update_();
   }
 }
 

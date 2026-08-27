@@ -159,6 +159,7 @@ class LoraMesh : public Component {
   const RouteEntry *find_route_(uint32_t dst_id) const;
   RouteEntry *find_nearest_gateway_route_();
   const RouteEntry *find_nearest_gateway_route_() const;
+  bool update_gateway_state_(RouteEntry *route, bool is_gateway);
   void update_route_(uint32_t dst_id, uint32_t next_hop, uint8_t hops, bool is_gw, float rssi, float snr);
   RouteEntry *alloc_route_slot_();
   void expire_routes_();
