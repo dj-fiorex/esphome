@@ -931,7 +931,7 @@ void LoraMesh::expire_routes_() {
       r.is_valid = false;
       any = true;
       // Passive self-healing (ADR 0002): a direct neighbour going silent
-      // invalidates every Route Forwarded through it, so those destinations are
+      // invalidates every Route using it as Next Hop, so those destinations are
       // re-learned from other neighbours' HELLOs instead of black-holing.
       if (r.dst_id == r.next_hop_id) {
         this->invalidate_routes_via_(r.dst_id);

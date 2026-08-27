@@ -705,7 +705,7 @@ static void test_send_to_gateway_reselects_current_nearest_gateway_on_every_call
   EXPECT_EQ(get_u32_le(&a.radio.sent[1][esphome::lora_mesh::MESH_OFF_DST_ID]), NODE_C);
 }
 
-static void test_online_node_has_no_local_send_to_gateway_delivery() {
+static void test_node_with_upstream_connectivity_has_no_local_send_to_gateway_delivery() {
   TestNode a("node-a");
 
   a.mesh.set_upstream_connected(true);
@@ -1299,7 +1299,7 @@ int main() {
   RUN_TEST(test_nearest_gateway_selection_is_deterministic);
   RUN_TEST(test_nearest_gateway_uses_strongest_equal_hop_path);
   RUN_TEST(test_send_to_gateway_reselects_current_nearest_gateway_on_every_call);
-  RUN_TEST(test_online_node_has_no_local_send_to_gateway_delivery);
+  RUN_TEST(test_node_with_upstream_connectivity_has_no_local_send_to_gateway_delivery);
   RUN_TEST(test_rejected_gateway_send_is_not_retried_after_queue_drains);
   RUN_TEST(test_three_node_gateway_discovery_and_delivery);
   RUN_TEST(test_gateway_promotion_and_withdrawal_propagate_promptly_and_select_alternative);
