@@ -58,6 +58,10 @@ lora_mesh:
 | `tx_queue_size` | `8` | Compile-time bounded TX queue capacity. |
 | `link_sim` | `false` | Debug-only neighbour blocklist used by the three-board test. |
 
+When `node_id` is omitted, the Node ID is the last three raw MAC bytes formatted as six uppercase hexadecimal
+characters (for example, MAC `02:00:00:AB:CD:EF` produces `ABCDEF`). This value is stable for a given MAC and is
+hashed with 32-bit FNV-1a exactly like a configured Node ID to produce the wire identity.
+
 There are no static, automatic, or manual Gateway modes. There is no `on_gateway_changed` trigger; applications query
 `has_gateway()` or handle `send_to_gateway()` returning `false` on their normal send schedule.
 

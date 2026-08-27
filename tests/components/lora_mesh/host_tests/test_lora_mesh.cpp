@@ -345,6 +345,48 @@ static void test_unicast_send_sets_next_hop_from_routing_table() {
   EXPECT_EQ(get_u32_le(&pkt[24]), NODE_B);  // next_hop = B (toward C)
 }
 
+static void test_mac_derived_default_node_id_is_stable_and_addressable() {
+  std::string reported_node_id;
+
+  {
+    FakeRadio target_radio;
+    esphome::lora_mesh::LoraMesh target(TEST_FABRIC_KEY_HEX);
+    bool delivered = false;
+    target.set_radio(&target_radio);
+    target.add_on_message_callback([&delivered](const esphome::lora_mesh::MeshMessage &message) {
+      delivered = message.payload.size() == 8 && memcmp(message.payload.data(), "water me", 8) == 0;
+    });
+    target.setup();  // Deliberately omit set_node_id().
+    target.loop();
+
+    reported_node_id = target.get_node_id();
+    EXPECT_TRUE(reported_node_id == "ABCDEF");
+    EXPECT_EQ(target_radio.sent.size(), 1u);
+    if (!target_radio.sent.empty()) {
+      EXPECT_EQ(get_u32_le(&target_radio.sent[0][6]), fnv1a_str(reported_node_id));
+    }
+
+    TestNode sender("node-a");
+    if (!target_radio.sent.empty()) {
+      sender.receive(target_radio.sent[0]);
+      EXPECT_TRUE(sender.mesh.send_message(reported_node_id, "water me"));
+      sender.mesh.loop();
+      EXPECT_EQ(sender.radio.sent.size(), 1u);
+      if (!sender.radio.sent.empty()) {
+        target.on_radio_packet(sender.radio.sent[0].data(), sender.radio.sent[0].size(), -60.0f, 8.0f);
+      }
+    }
+
+    EXPECT_TRUE(delivered);
+  }
+
+  FakeRadio rebooted_radio;
+  esphome::lora_mesh::LoraMesh rebooted(TEST_FABRIC_KEY_HEX);
+  rebooted.set_radio(&rebooted_radio);
+  rebooted.setup();  // Same fake MAC, still no configured node_id.
+  EXPECT_TRUE(rebooted.get_node_id() == reported_node_id);
+}
+
 // ── Slice 4: delivery and (src_id, frame_counter) dedup ─────────────────────
 
 static void test_unicast_delivered_to_destination() {
@@ -1307,6 +1349,7 @@ int main() {
   RUN_TEST(test_authenticated_hello_with_invalid_route_cannot_change_state);
   RUN_TEST(test_fabric_mismatch_drops_packet);
   RUN_TEST(test_unicast_send_sets_next_hop_from_routing_table);
+  RUN_TEST(test_mac_derived_default_node_id_is_stable_and_addressable);
   RUN_TEST(test_unicast_delivered_to_destination);
   RUN_TEST(test_duplicate_frame_counter_suppressed);
   RUN_TEST(test_designated_next_hop_forwards_and_rewrites_header);
