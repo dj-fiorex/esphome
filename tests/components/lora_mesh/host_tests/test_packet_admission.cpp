@@ -4,9 +4,11 @@
 
 int g_failures = 0;
 
-using namespace lmtest;
 using esphome::lora_mesh::AdmissionFailure;
 using esphome::lora_mesh::PacketAdmission;
+using lmtest::fnv1a_str;
+using lmtest::make_data;
+using lmtest::make_hello;
 
 static const uint32_t FABRIC = 0xDEFF3662;
 static const uint32_t NODE_A = fnv1a_str("node-a");
