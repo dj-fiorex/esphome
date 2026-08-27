@@ -1529,6 +1529,38 @@ static void test_replay_rejected() {
   EXPECT_EQ(b.received.size(), 2u);
 }
 
+static void test_replay_table_pressure_fails_closed_without_forgetting_known_sources() {
+  TestNode b("node-b");
+  b.mesh.set_seen_cache_ttl(100);
+  constexpr uint32_t first_source = 0xA0000000;
+
+  auto first_packet = make_data(FABRIC, first_source, NODE_B, NODE_B, "original", 100, 8, 0, first_source);
+  b.receive(first_packet);
+  for (size_t i = 1; i < LORA_MESH_MAX_ROUTES; ++i) {
+    uint32_t source = first_source + static_cast<uint32_t>(i);
+    b.receive(make_data(FABRIC, source, NODE_B, NODE_B, "fill", 100, 8, 0, source));
+  }
+  EXPECT_EQ(b.received.size(), static_cast<size_t>(LORA_MESH_MAX_ROUTES));
+
+  // Once every fixed replay slot belongs to a known source, a new source must
+  // fail closed instead of evicting a high-water mark.
+  uint32_t unknown_source = first_source + LORA_MESH_MAX_ROUTES;
+  b.receive(make_data(FABRIC, unknown_source, NODE_B, NODE_B, "unknown", 100, 8, 0, unknown_source));
+  EXPECT_EQ(b.received.size(), static_cast<size_t>(LORA_MESH_MAX_ROUTES));
+
+  // Table pressure must not prevent a retained source from advancing.
+  uint32_t retained_source = first_source + LORA_MESH_MAX_ROUTES - 1;
+  b.receive(make_data(FABRIC, retained_source, NODE_B, NODE_B, "advance", 101, 8, 0, retained_source));
+  EXPECT_EQ(b.received.size(), static_cast<size_t>(LORA_MESH_MAX_ROUTES + 1));
+
+  // Exercise replay protection rather than duplicate suppression: expire the
+  // Seen-cache, then resend the original authenticated DATA frame.
+  esphome::test_clock_advance(10000);
+  b.mesh.loop();
+  b.receive(first_packet);
+  EXPECT_EQ(b.received.size(), static_cast<size_t>(LORA_MESH_MAX_ROUTES + 1));
+}
+
 static void test_frame_counter_persists_across_reboot() {
   // Simulate: node A sends messages, then "reboots" (new TestNode with same identity).
   // The frame counter should resume from the NVS-persisted value, never reusing.
@@ -1667,6 +1699,7 @@ int main() {
   RUN_TEST(test_protocol_v3_four_byte_data_tag_is_rejected);
   RUN_TEST(test_protocol_v3_four_byte_data_tag_is_not_forwarded);
   RUN_TEST(test_replay_rejected);
+  RUN_TEST(test_replay_table_pressure_fails_closed_without_forgetting_known_sources);
   RUN_TEST(test_frame_counter_persists_across_reboot);
   RUN_TEST(test_final_frame_counter_is_reserved_and_used_only_once);
   RUN_TEST(test_reboot_at_frame_counter_exhaustion_refuses_all_data_sends);

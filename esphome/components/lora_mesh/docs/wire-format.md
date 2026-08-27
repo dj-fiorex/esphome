@@ -118,6 +118,11 @@ Receivers keep a runtime high-water counter per source. After successful tag ver
 or below the high-water value, then advance it for accepted DATA. The receiver high-water table is intentionally
 runtime-only; durable application command sequencing owns reboot-safe actuator idempotency.
 
+The receiver high-water table has the same fixed capacity as the Route table and never evicts an accepted source.
+When it is full, authenticated DATA addressed to that receiver from an unknown source is rejected fail-safe until
+reboot; known sources remain eligible only when their counters advance monotonically. This trades new-source
+availability under pressure for replay safety without runtime heap allocation.
+
 ## Receive and Forwarding summary
 
 1. Reject a mismatched Fabric ID or the Node's own echoed source ID.

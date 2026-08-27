@@ -565,11 +565,15 @@ void LoraMesh::process_data_(const uint8_t *pkt, size_t pkt_len, const uint8_t *
   bool is_for_us = is_broadcast || (dst_id == this->node_id_);
 
   if (is_for_us) {
-    if (this->is_replay_(src_id, frame_counter)) {
+    ReplayDecision replay_decision = this->admit_replay_counter_(src_id, frame_counter);
+    if (replay_decision == ReplayDecision::REPLAY) {
       ESP_LOGW(TAG, "DATA from 0x%08" PRIX32 " frame=%" PRIu32 " replay rejected", src_id, frame_counter);
       return;
     }
-    this->update_replay_counter_(src_id, frame_counter);
+    if (replay_decision == ReplayDecision::TABLE_FULL) {
+      ESP_LOGW(TAG, "Replay table full; DATA from unknown source 0x%08" PRIX32 " rejected fail-safe", src_id);
+      return;
+    }
 
     MeshMessage msg;
     LoraMesh::id_to_hex(src_id, msg.source);
@@ -1216,43 +1220,27 @@ void LoraMesh::load_frame_counter_() {
 
 // ─── Replay protection ────────────────────────────────────────────────────────
 
-bool LoraMesh::is_replay_(uint32_t src_id, uint32_t frame_counter) {
-  for (const auto &entry : this->replay_counters_) {
-    if (entry.is_valid && entry.src_id == src_id) {
-      return frame_counter <= entry.high_water;
-    }
-  }
-  return false;  // Unknown source — not a replay.
-}
-
-void LoraMesh::update_replay_counter_(uint32_t src_id, uint32_t frame_counter) {
-  // Update existing entry.
+LoraMesh::ReplayDecision LoraMesh::admit_replay_counter_(uint32_t src_id, uint32_t frame_counter) {
+  ReplayEntry *unused = nullptr;
   for (auto &entry : this->replay_counters_) {
     if (entry.is_valid && entry.src_id == src_id) {
-      if (frame_counter > entry.high_water) {
-        entry.high_water = frame_counter;
+      if (frame_counter <= entry.high_water) {
+        return ReplayDecision::REPLAY;
       }
-      return;
-    }
-  }
-  // Allocate new slot.
-  for (auto &entry : this->replay_counters_) {
-    if (!entry.is_valid) {
-      entry.src_id = src_id;
       entry.high_water = frame_counter;
-      entry.is_valid = true;
-      return;
+      return ReplayDecision::ACCEPT;
+    }
+    if (!entry.is_valid && unused == nullptr) {
+      unused = &entry;
     }
   }
-  // Table full: evict oldest (lowest high_water).
-  ReplayEntry *oldest = &this->replay_counters_[0];
-  for (auto &entry : this->replay_counters_) {
-    if (entry.high_water < oldest->high_water) {
-      oldest = &entry;
-    }
+  if (unused == nullptr) {
+    return ReplayDecision::TABLE_FULL;
   }
-  oldest->src_id = src_id;
-  oldest->high_water = frame_counter;
+  unused->src_id = src_id;
+  unused->high_water = frame_counter;
+  unused->is_valid = true;
+  return ReplayDecision::ACCEPT;
 }
 
 }  // namespace esphome::lora_mesh

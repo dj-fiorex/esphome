@@ -206,10 +206,9 @@ class LoraMesh : public Component {
   void load_frame_counter_();
 
   // ── Replay protection ─────────────────────────────────────────────────
-  /** Check frame_counter against per-source high-water mark; returns true if replay. */
-  bool is_replay_(uint32_t src_id, uint32_t frame_counter);
-  /** Update high-water mark for a source after successful MIC verification. */
-  void update_replay_counter_(uint32_t src_id, uint32_t frame_counter);
+  enum class ReplayDecision : uint8_t { ACCEPT, REPLAY, TABLE_FULL };
+  /** Atomically admit and record an authenticated counter, failing closed when an unknown source cannot be stored. */
+  ReplayDecision admit_replay_counter_(uint32_t src_id, uint32_t frame_counter);
 
  private:
   // The Fabric identity is invariant-coupled: the ID must only ever be the
@@ -218,6 +217,15 @@ class LoraMesh : public Component {
   std::array<uint8_t, FABRIC_KEY_SIZE> fabric_key_{};
   std::array<uint8_t, CONTROL_PLANE_KEY_SIZE> control_plane_key_{};
   bool fabric_key_valid_{false};
+
+  // Replay high-water state is safety-critical: only admit_replay_counter_()
+  // may mutate it so accepted sources can never be evicted under pressure.
+  struct ReplayEntry {
+    uint32_t src_id{0};
+    uint32_t high_water{0};
+    bool is_valid{false};
+  };
+  std::array<ReplayEntry, LORA_MESH_MAX_ROUTES> replay_counters_{};
 
  protected:
   // ── State ──────────────────────────────────────────────────────────────
@@ -250,15 +258,6 @@ class LoraMesh : public Component {
   static constexpr uint32_t FRAME_COUNTER_BATCH = 1000;
   uint32_t frame_counter_persist_threshold_{0};  // write NVS when frame_counter_ >= this
   ESPPreferenceObject frame_counter_pref_{};
-
-  // ── Replay protection (per-source high-water marks) ───────────────────
-  struct ReplayEntry {
-    uint32_t src_id{0};
-    uint32_t high_water{0};
-    bool is_valid{false};
-  };
-  // Same capacity as the routing table — one entry per known source.
-  std::array<ReplayEntry, LORA_MESH_MAX_ROUTES> replay_counters_{};
 
   // Fixed-size arrays (sizes set by LORA_MESH_MAX_ROUTES / LORA_MESH_SEEN_CACHE_SIZE defines)
   std::array<RouteEntry, LORA_MESH_MAX_ROUTES> routes_{};
