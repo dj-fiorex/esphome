@@ -3,10 +3,14 @@
 #include "test_harness.h"
 
 #include <limits>
+#include <type_traits>
 
 int g_failures = 0;
 
 using namespace lmtest;
+
+static_assert(!std::is_constructible_v<LoraMesh, const std::string &>);
+static_assert(std::is_constructible_v<LoraMesh, const std::string &, esphome::lora_mesh::LoRaRadio *>);
 
 static const uint32_t FABRIC = 0xDEFF3662;
 static const uint32_t NODE_A = fnv1a_str("node-a");
@@ -414,9 +418,8 @@ static void test_mac_derived_default_node_id_is_stable_and_addressable() {
 
   {
     FakeRadio target_radio;
-    esphome::lora_mesh::LoraMesh target(TEST_FABRIC_KEY_HEX);
+    esphome::lora_mesh::LoraMesh target(TEST_FABRIC_KEY_HEX, &target_radio);
     bool delivered = false;
-    target.set_radio(&target_radio);
     target.add_on_message_callback([&delivered](const esphome::lora_mesh::MeshMessage &message) {
       delivered = message.payload.size() == 8 && memcmp(message.payload.data(), "water me", 8) == 0;
     });
@@ -445,8 +448,7 @@ static void test_mac_derived_default_node_id_is_stable_and_addressable() {
   }
 
   FakeRadio rebooted_radio;
-  esphome::lora_mesh::LoraMesh rebooted(TEST_FABRIC_KEY_HEX);
-  rebooted.set_radio(&rebooted_radio);
+  esphome::lora_mesh::LoraMesh rebooted(TEST_FABRIC_KEY_HEX, &rebooted_radio);
   rebooted.setup();  // Same fake MAC, still no configured node_id.
   EXPECT_TRUE(rebooted.get_node_id() == reported_node_id);
 }
@@ -1408,8 +1410,7 @@ static void test_same_fabric_key_decrypts_payload() {
 
 static void test_receive_dispatch_does_not_allocate() {
   FakeRadio radio;
-  LoraMesh mesh(TEST_FABRIC_KEY_HEX);
-  mesh.set_radio(&radio);
+  LoraMesh mesh(TEST_FABRIC_KEY_HEX, &radio);
   mesh.set_node_id(esphome::TemplatableValue<std::string>("node-b"));
 
   std::array<uint8_t, esphome::lora_mesh::MESH_MAX_DATA_PAYLOAD_SIZE> delivered{};
@@ -1435,8 +1436,7 @@ static void test_receive_dispatch_does_not_allocate() {
 
 static void test_message_copy_owns_payload_for_deferred_automation() {
   FakeRadio radio;
-  LoraMesh mesh(TEST_FABRIC_KEY_HEX);
-  mesh.set_radio(&radio);
+  LoraMesh mesh(TEST_FABRIC_KEY_HEX, &radio);
   mesh.set_node_id(esphome::TemplatableValue<std::string>("node-b"));
 
   esphome::lora_mesh::MeshMessage retained;

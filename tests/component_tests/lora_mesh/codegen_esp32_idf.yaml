@@ -1,0 +1,7 @@
+esphome:
+  name: ${codegen_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf

@@ -39,7 +39,7 @@ namespace esphome::lora_mesh {
 
 class LoraMesh : public Component {
  public:
-  explicit LoraMesh(const std::string &fabric_key_hex);
+  explicit LoraMesh(const std::string &fabric_key_hex, LoRaRadio *radio);
 
   // ── Component lifecycle ──────────────────────────────────────────────────
   void setup() override;
@@ -48,7 +48,6 @@ class LoraMesh : public Component {
   float get_setup_priority() const override { return setup_priority::PROCESSOR - 1.0f; }
 
   // ── Configuration setters (called from Python codegen) ────────────────
-  void set_radio(LoRaRadio *radio) { this->radio_ = radio; }
   void set_node_id(const TemplatableValue<std::string> &node_id) {
     this->node_id_template_ = node_id;
     this->has_node_id_ = true;
@@ -230,7 +229,7 @@ class LoraMesh : public Component {
 
  protected:
   // ── State ──────────────────────────────────────────────────────────────
-  LoRaRadio *radio_{nullptr};
+  LoRaRadio *radio_;
   uint32_t node_id_{0};
   std::string node_id_str_;
   TemplatableValue<std::string> node_id_template_;

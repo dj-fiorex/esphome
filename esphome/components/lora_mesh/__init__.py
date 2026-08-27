@@ -132,19 +132,6 @@ CONFIG_SCHEMA = cv.All(
 
 
 async def to_code(config) -> None:
-    var = cg.new_Pvariable(config[CONF_ID], config[CONF_FABRIC_KEY])
-    await cg.register_component(var, config)
-
-    # Compile-time array sizes via preprocessor defines.
-    cg.add_define("LORA_MESH_MAX_ROUTES", config[CONF_MAX_ROUTES])
-    cg.add_define("LORA_MESH_SEEN_CACHE_SIZE", config[CONF_SEEN_CACHE_SIZE])
-    cg.add_define("LORA_MESH_TX_QUEUE_SIZE", config[CONF_TX_QUEUE_SIZE])
-
-    # Link simulator is an opt-in, debug-only feature (see ADR-0004); compile it
-    # out completely unless explicitly enabled.
-    if config[CONF_LINK_SIM]:
-        cg.add_define("LORA_MESH_LINK_SIM")
-
     # ── Radio adapter ──────────────────────────────────────────────────────
     radio_id, radio_var = await cg.get_variable_with_full_id(config[CONF_RADIO_ID])
     radio_type = radio_id.type
@@ -157,7 +144,6 @@ async def to_code(config) -> None:
             type=LoRaSX126xRadio,
         )
         adapter = cg.new_Pvariable(adapter_id, radio_var)
-        cg.add(var.set_radio(adapter))
 
     elif radio_type is SX127x:
         cg.add_define("LORA_MESH_USE_SX127X")
@@ -167,13 +153,25 @@ async def to_code(config) -> None:
             type=LoRaSX127xRadio,
         )
         adapter = cg.new_Pvariable(adapter_id, radio_var)
-        cg.add(var.set_radio(adapter))
 
     else:
         raise cv.Invalid(
             f"radio_id must reference an sx126x or sx127x component "
             f"(got type: {radio_type})"
         )
+
+    var = cg.new_Pvariable(config[CONF_ID], config[CONF_FABRIC_KEY], adapter)
+    await cg.register_component(var, config)
+
+    # Compile-time array sizes via preprocessor defines.
+    cg.add_define("LORA_MESH_MAX_ROUTES", config[CONF_MAX_ROUTES])
+    cg.add_define("LORA_MESH_SEEN_CACHE_SIZE", config[CONF_SEEN_CACHE_SIZE])
+    cg.add_define("LORA_MESH_TX_QUEUE_SIZE", config[CONF_TX_QUEUE_SIZE])
+
+    # Link simulator is an opt-in, debug-only feature (see ADR-0004); compile it
+    # out completely unless explicitly enabled.
+    if config[CONF_LINK_SIM]:
+        cg.add_define("LORA_MESH_LINK_SIM")
 
     # ── Configuration setters ─────────────────────────────────────────────
     if CONF_NODE_ID in config:

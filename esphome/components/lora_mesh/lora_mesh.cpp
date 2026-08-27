@@ -26,7 +26,7 @@ static bool is_preferred_gateway_route(const RouteEntry &candidate, const RouteE
 
 void LoraMesh::id_to_hex(uint32_t id, char out[9]) { snprintf(out, 9, "%08" PRIX32, id); }
 
-LoraMesh::LoraMesh(const std::string &fabric_key_hex) {
+LoraMesh::LoraMesh(const std::string &fabric_key_hex, LoRaRadio *radio) : radio_(radio) {
   if (fabric_key_hex.size() != FABRIC_KEY_SIZE * 2) {
     return;
   }

@@ -140,8 +140,7 @@ struct TestNode {
   std::vector<CapturedMessage> received;
 
   explicit TestNode(const std::string &node_id, const std::string &fabric_key_hex = TEST_FABRIC_KEY_HEX)
-      : mesh(fabric_key_hex) {
-    this->mesh.set_radio(&this->radio);
+      : mesh(fabric_key_hex, &this->radio) {
     this->mesh.set_node_id(esphome::TemplatableValue<std::string>(node_id));
     this->mesh.add_on_message_callback([this](const esphome::lora_mesh::MeshMessage &msg) {
       CapturedMessage captured;
