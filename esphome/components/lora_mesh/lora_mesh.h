@@ -7,6 +7,7 @@
 #include "lora_mesh_crypto.h"
 #include "lora_packet.h"
 #include "lora_radio.h"
+#include "route_table.h"
 
 #ifdef USE_SENSOR
 #include "esphome/components/sensor/sensor.h"
@@ -27,9 +28,6 @@ namespace esphome::lora_mesh {
 
 // Array sizes are set at compile time via Python cg.add_define().
 // These fallback values are only used for IDE/static-analysis builds.
-#ifndef LORA_MESH_MAX_ROUTES
-#define LORA_MESH_MAX_ROUTES 16  // NOLINT(cppcoreguidelines-macro-usage)
-#endif
 #ifndef LORA_MESH_SEEN_CACHE_SIZE
 #define LORA_MESH_SEEN_CACHE_SIZE 32  // NOLINT(cppcoreguidelines-macro-usage)
 #endif
@@ -61,7 +59,7 @@ class LoraMesh : public Component {
     }
   }
   void set_discovery_interval(uint32_t ms) { this->discovery_interval_ms_ = ms; }
-  void set_route_ttl(uint32_t ms) { this->route_ttl_ms_ = ms; }
+  void set_route_ttl(uint32_t ms) { this->routing_table_.set_route_ttl(ms); }
   void set_seen_cache_ttl(uint32_t ms) { this->seen_cache_ttl_ms_ = ms; }
   void set_forward_messages(bool forward) { this->forward_messages_ = forward; }
   void set_tx_jitter(uint32_t ms) { this->tx_jitter_ms_ = ms; }
@@ -157,19 +155,7 @@ class LoraMesh : public Component {
   void process_data_(const PacketHeader &header, std::span<const uint8_t> packet, std::span<const uint8_t> plaintext,
                      float rssi, float snr);
 
-  // ── Routing helpers ────────────────────────────────────────────────────
-  RouteEntry *find_route_(uint32_t dst_id);
-  const RouteEntry *find_route_(uint32_t dst_id) const;
-  RouteEntry *find_nearest_gateway_route_();
-  const RouteEntry *find_nearest_gateway_route_() const;
-  bool update_gateway_state_(RouteEntry *route, bool is_gateway);
-  void update_route_(uint32_t dst_id, uint32_t next_hop, uint8_t hops, bool is_gw, float rssi, float snr);
-  RouteEntry *alloc_route_slot_();
-  void expire_routes_();
-  void invalidate_routes_via_(uint32_t neighbor_id);
-  bool is_route_held_down_(uint32_t dst_id, uint8_t candidate_hops);
-  void clear_route_hold_down_(uint32_t dst_id);
-  void hold_down_route_(RouteEntry &route, uint32_t now);
+  // ── Route change orchestration ─────────────────────────────────────────
   void notify_route_changed_();
 
   // ── Duplicate suppression ──────────────────────────────────────────────
@@ -237,7 +223,6 @@ class LoraMesh : public Component {
   QueuedHelloState queued_hello_state_{QueuedHelloState::NONE};
   uint8_t max_hops_{8};
   uint32_t discovery_interval_ms_{30000};
-  uint32_t route_ttl_ms_{90000};
   uint32_t seen_cache_ttl_ms_{120000};
   bool forward_messages_{true};
   uint32_t frame_counter_{0};
@@ -245,7 +230,6 @@ class LoraMesh : public Component {
   uint32_t last_expire_check_{0};
   uint32_t last_diag_publish_{0};
   static constexpr uint32_t HELLO_UPDATE_MIN_INTERVAL_MS = 1000;
-  static constexpr uint32_t ROUTE_EXPIRY_CHECK_INTERVAL_MS = 10000;
 
   // ── Frame counter persistence (batched NVS writes) ────────────────────
   // We persist frame_counter_ in batches: on boot we load the persisted value
@@ -256,7 +240,7 @@ class LoraMesh : public Component {
   ESPPreferenceObject frame_counter_pref_{};
 
   // Fixed-size arrays (sizes set by LORA_MESH_MAX_ROUTES / LORA_MESH_SEEN_CACHE_SIZE defines)
-  std::array<RouteEntry, LORA_MESH_MAX_ROUTES> routes_{};
+  RouteTable routing_table_;
   std::array<SeenEntry, LORA_MESH_SEEN_CACHE_SIZE> seen_cache_{};
   size_t seen_cache_head_{0};
 

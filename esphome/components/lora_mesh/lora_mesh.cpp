@@ -16,12 +16,6 @@ static const char *const TAG = "lora_mesh";
 // NVS key prefixes for preference hashes.
 static const char *const NVS_PREFIX_FRAME_COUNTER = "lora_mesh_fc_";
 
-static bool is_preferred_gateway_route(const RouteEntry &candidate, const RouteEntry *current) {
-  return current == nullptr || candidate.hop_count < current->hop_count ||
-         (candidate.hop_count == current->hop_count &&
-          (candidate.rssi > current->rssi || (candidate.rssi == current->rssi && candidate.dst_id < current->dst_id)));
-}
-
 // ─── Utility ──────────────────────────────────────────────────────────────────
 
 void LoraMesh::id_to_hex(uint32_t id, char out[9]) { snprintf(out, 9, "%08" PRIX32, id); }
@@ -78,9 +72,7 @@ void LoraMesh::setup() {
     this->node_id_ = fnv1a_str(this->node_id_str_);
   }
   // Initialise arrays.
-  for (auto &r : this->routes_) {
-    r = RouteEntry{};
-  }
+  this->routing_table_.clear();
   for (auto &s : this->seen_cache_) {
     s = SeenEntry{};
   }
@@ -118,9 +110,11 @@ void LoraMesh::loop() {
   // Expire Routes before building this interval's HELLO. Advertising a Route
   // in the same loop iteration that invalidates it gives neighbours one final
   // stale lease and defeats bounded withdrawal.
-  if (now - this->last_expire_check_ >= this->ROUTE_EXPIRY_CHECK_INTERVAL_MS) {
+  if (now - this->last_expire_check_ >= RouteTable::EXPIRY_SCAN_INTERVAL_MS) {
     this->last_expire_check_ = now;
-    this->expire_routes_();
+    if (this->routing_table_.expire(now)) {
+      this->notify_route_changed_();
+    }
     this->expire_seen_();
   }
 
@@ -146,9 +140,9 @@ void LoraMesh::dump_config() {
   ESP_LOGCONFIG(TAG, "  Upstream connectivity: %s", this->upstream_connected_ ? "connected" : "disconnected");
   ESP_LOGCONFIG(TAG, "  Max hops: %u", this->max_hops_);
   ESP_LOGCONFIG(TAG, "  Discovery interval: %" PRIu32 " ms", this->discovery_interval_ms_);
-  ESP_LOGCONFIG(TAG, "  Route TTL: %" PRIu32 " ms", this->route_ttl_ms_);
+  ESP_LOGCONFIG(TAG, "  Route TTL: %" PRIu32 " ms", this->routing_table_.get_route_ttl());
   ESP_LOGCONFIG(TAG, "  Forward messages: %s", this->forward_messages_ ? "yes" : "no");
-  ESP_LOGCONFIG(TAG, "  Max routes: %zu", this->routes_.size());
+  ESP_LOGCONFIG(TAG, "  Max routes: %zu", this->routing_table_.entries().size());
   ESP_LOGCONFIG(TAG, "  Seen cache size: %zu", this->seen_cache_.size());
   ESP_LOGCONFIG(TAG, "  TX queue size: %zu", this->tx_queue_.size());
   ESP_LOGCONFIG(TAG, "  TX jitter: %" PRIu32 " ms", this->tx_jitter_ms_);
@@ -158,7 +152,7 @@ void LoraMesh::dump_config() {
 
 bool LoraMesh::send_message(const std::string &destination, std::span<const uint8_t> payload) {
   uint32_t dst_id = fnv1a_str(destination);
-  const RouteEntry *route = this->find_route_(dst_id);
+  const RouteEntry *route = this->routing_table_.find(dst_id);
   if (route == nullptr) {
     ESP_LOGW(TAG, "No route to %s", destination.c_str());
     return false;
@@ -187,7 +181,7 @@ bool LoraMesh::broadcast_message(std::span<const uint8_t> payload) {
 }
 
 bool LoraMesh::send_to_gateway(std::span<const uint8_t> payload) {
-  const RouteEntry *gw = this->find_nearest_gateway_route_();
+  const RouteEntry *gw = this->routing_table_.nearest_gateway();
   if (gw == nullptr) {
     ESP_LOGW(TAG, "send_to_gateway: no gateway in routing table");
     return false;
@@ -214,12 +208,14 @@ void LoraMesh::set_upstream_connected(bool connected) {
   }
 }
 
-bool LoraMesh::has_route(const std::string &node_id) const { return this->find_route_(fnv1a_str(node_id)) != nullptr; }
+bool LoraMesh::has_route(const std::string &node_id) const {
+  return this->routing_table_.find(fnv1a_str(node_id)) != nullptr;
+}
 
-bool LoraMesh::has_gateway() const { return this->find_nearest_gateway_route_() != nullptr; }
+bool LoraMesh::has_gateway() const { return this->routing_table_.nearest_gateway() != nullptr; }
 
 std::string LoraMesh::get_nearest_gateway() const {
-  const RouteEntry *gw = this->find_nearest_gateway_route_();
+  const RouteEntry *gw = this->routing_table_.nearest_gateway();
   if (gw == nullptr) {
     return {};
   }
@@ -229,23 +225,12 @@ std::string LoraMesh::get_nearest_gateway() const {
 }
 
 void LoraMesh::clear_routes() {
-  for (auto &r : this->routes_) {
-    r.is_valid = false;
-    r.hold_down = false;
-  }
+  this->routing_table_.clear();
   this->notify_route_changed_();
   ESP_LOGI(TAG, "Routing table cleared");
 }
 
-size_t LoraMesh::get_known_node_count() const {
-  size_t count = 0;
-  for (const auto &r : this->routes_) {
-    if (r.is_valid) {
-      ++count;
-    }
-  }
-  return count;
-}
+size_t LoraMesh::get_known_node_count() const { return this->routing_table_.count(); }
 
 std::string LoraMesh::get_routing_table_json() const {
   // Pre-reserve: each entry is ~90 bytes; +2 for '[' and ']'.
@@ -256,7 +241,7 @@ std::string LoraMesh::get_routing_table_json() const {
   out.reserve(2 + entry_count * 130);
   out = '[';
   bool first = true;
-  for (const auto &r : this->routes_) {
+  for (const auto &r : this->routing_table_.entries()) {
     if (!r.is_valid) {
       continue;
     }
@@ -488,8 +473,15 @@ void LoraMesh::process_hello_(const PacketHeader &header, std::span<const uint8_
   }
 
   // A packet from another protocol version must not change mesh state.
-  this->clear_route_hold_down_(header.src_id);
-  this->update_route_(header.src_id, header.src_id, 1, (header.flags & FLAG_IS_GATEWAY) != 0, rssi, snr);
+  uint32_t now = millis();
+  RouteUpdate neighbor_update =
+      this->routing_table_.observe_neighbor(header.src_id, (header.flags & FLAG_IS_GATEWAY) != 0, rssi, snr, now);
+  if (neighbor_update.gateway_changed) {
+    this->schedule_hello_update_();
+  }
+  if (neighbor_update.changed) {
+    this->notify_route_changed_();
+  }
 
   uint8_t name_len = packet[offset + 1];
 
@@ -519,23 +511,13 @@ void LoraMesh::process_hello_(const PacketHeader &header, std::span<const uint8_
     if (new_hops > this->max_hops_) {
       continue;
     }
-    if (this->is_route_held_down_(adv_dst, static_cast<uint8_t>(new_hops))) {
-      continue;
-    }
     float path_rssi = std::min(advertised_rssi, rssi);
-    RouteEntry *existing = this->find_route_(adv_dst);
-    // Accept a strictly better path from anyone; renew the lease when our
-    // current next hop re-confirms the route at equal quality (ADR 0002) —
-    // otherwise stable multi-hop routes expire and flap every route_ttl.
-    bool better = existing == nullptr || new_hops < existing->hop_count ||
-                  (new_hops == existing->hop_count && path_rssi > existing->rssi);
-    bool reconfirmed = existing != nullptr && existing->next_hop_id == header.src_id && new_hops == existing->hop_count;
-    if (better || reconfirmed) {
-      this->update_route_(adv_dst, header.src_id, static_cast<uint8_t>(new_hops), advertised_gateway, path_rssi, snr);
-    } else if (existing != nullptr && this->update_gateway_state_(existing, advertised_gateway)) {
-      // Gateway eligibility belongs to the destination, not to one path. A
-      // promotion or Withdrawal arriving over a worse Route must propagate
-      // without replacing or renewing the currently preferred Route.
+    RouteUpdate route_update = this->routing_table_.consider(
+        {adv_dst, header.src_id, static_cast<uint8_t>(new_hops), advertised_gateway, path_rssi, snr}, now);
+    if (route_update.gateway_changed) {
+      this->schedule_hello_update_();
+    }
+    if (route_update.changed) {
       this->notify_route_changed_();
     }
   }
@@ -596,7 +578,7 @@ void LoraMesh::process_data_(const PacketHeader &header, std::span<const uint8_t
     if (header.next_hop != this->node_id_) {
       return;
     }
-    route = this->find_route_(header.dst_id);
+    route = this->routing_table_.find(header.dst_id);
     if (route == nullptr) {
       ESP_LOGW(TAG, "No route to forward 0x%08" PRIX32, header.dst_id);
       return;
@@ -643,7 +625,7 @@ Packet LoraMesh::build_hello_packet_() {
   static_assert(LORA_MESH_MAX_ROUTES <= 255, "LORA_MESH_MAX_ROUTES must be <= 255");
   std::array<const RouteEntry *, LORA_MESH_MAX_ROUTES> ptrs{};
   size_t count = 0;
-  for (const auto &r : this->routes_) {
+  for (const auto &r : this->routing_table_.entries()) {
     if (r.is_valid && count < ptrs.size()) {
       ptrs[count++] = &r;
     }
@@ -849,229 +831,11 @@ void LoraMesh::acknowledge_advertised_gateway_updates_(const Packet &hello) {
   uint8_t route_count = hello[route_count_offset];
   size_t route_offset = route_count_offset + 1;
   for (uint8_t index = 0; index < route_count; ++index, route_offset += ROUTE_ADV_SIZE) {
-    RouteEntry *route = this->find_route_(get_u32_le(&hello[route_offset + ROUTE_ADV_OFF_DEST_ID]));
-    if (route != nullptr) {
-      route->gateway_update_pending = false;
-    }
+    this->routing_table_.acknowledge_gateway_update(get_u32_le(&hello[route_offset + ROUTE_ADV_OFF_DEST_ID]));
   }
 }
 
-bool LoraMesh::has_pending_gateway_updates_() const {
-  for (const auto &route : this->routes_) {
-    if (route.is_valid && route.gateway_update_pending) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// ─── Routing table ────────────────────────────────────────────────────────────
-
-RouteEntry *LoraMesh::find_route_(uint32_t dst_id) {
-  for (auto &r : this->routes_) {
-    if (r.is_valid && r.dst_id == dst_id) {
-      return &r;
-    }
-  }
-  return nullptr;
-}
-
-const RouteEntry *LoraMesh::find_route_(uint32_t dst_id) const {
-  for (const auto &r : this->routes_) {
-    if (r.is_valid && r.dst_id == dst_id) {
-      return &r;
-    }
-  }
-  return nullptr;
-}
-
-RouteEntry *LoraMesh::find_nearest_gateway_route_() {
-  RouteEntry *nearest = nullptr;
-  for (auto &r : this->routes_) {
-    if (!r.is_valid || !r.is_gateway) {
-      continue;
-    }
-    if (is_preferred_gateway_route(r, nearest)) {
-      nearest = &r;
-    }
-  }
-  return nearest;
-}
-
-const RouteEntry *LoraMesh::find_nearest_gateway_route_() const {
-  const RouteEntry *nearest = nullptr;
-  for (const auto &r : this->routes_) {
-    if (!r.is_valid || !r.is_gateway) {
-      continue;
-    }
-    if (is_preferred_gateway_route(r, nearest)) {
-      nearest = &r;
-    }
-  }
-  return nearest;
-}
-
-RouteEntry *LoraMesh::alloc_route_slot_() {
-  uint32_t now = millis();
-  for (auto &r : this->routes_) {
-    if (!r.is_valid) {
-      if (r.hold_down && static_cast<int32_t>(r.expires_at - now) > 0) {
-        continue;
-      }
-      r.hold_down = false;
-      return &r;
-    }
-  }
-  // Table full: evict the non-pending route with most hops, lowest RSSI. A
-  // Gateway change remains protected until a HELLO has actually advertised it;
-  // if every Route is pending, defer learning the new Route until a later HELLO.
-  RouteEntry *worst = nullptr;
-  for (auto &r : this->routes_) {
-    if (!r.is_valid) {
-      continue;
-    }
-    if (r.gateway_update_pending) {
-      continue;
-    }
-    if (worst == nullptr || r.hop_count > worst->hop_count ||
-        (r.hop_count == worst->hop_count && r.rssi < worst->rssi)) {
-      worst = &r;
-    }
-  }
-  if (worst != nullptr) {
-    ESP_LOGD(TAG, "Route table full, evicting 0x%08" PRIX32, worst->dst_id);
-    worst->is_valid = false;
-  } else {
-    ESP_LOGD(TAG, "Route table full of pending Gateway updates, deferring new Route");
-  }
-  return worst;
-}
-
-bool LoraMesh::update_gateway_state_(RouteEntry *route, bool is_gateway) {
-  if (route->is_gateway == is_gateway) {
-    return false;
-  }
-  route->is_gateway = is_gateway;
-  route->gateway_update_pending = true;
-  this->schedule_hello_update_();
-  return true;
-}
-
-void LoraMesh::update_route_(uint32_t dst_id, uint32_t next_hop, uint8_t hops, bool is_gw, float rssi, float snr) {
-  if (hops < MESH_MIN_ADVERTISED_HOPS || hops > MESH_MAX_ADVERTISED_HOPS) {
-    return;
-  }
-  uint32_t now = millis();
-  RouteEntry *r = this->find_route_(dst_id);
-  bool changed = false;
-  if (r == nullptr) {
-    r = this->alloc_route_slot_();
-    if (r == nullptr) {
-      return;
-    }
-    *r = RouteEntry{};
-    r->dst_id = dst_id;
-    changed = true;
-  }
-  bool current_route_reconfirmed = r->is_valid && hops == r->hop_count && r->next_hop_id == next_hop;
-  bool update_path = !r->is_valid || current_route_reconfirmed || hops < r->hop_count ||
-                     (hops == r->hop_count && rssi > r->rssi) || r->next_hop_id != next_hop;
-  if (update_path) {
-    changed = changed || !r->is_valid || r->next_hop_id != next_hop || r->hop_count != hops || r->rssi != rssi ||
-              r->snr != snr;
-    r->next_hop_id = next_hop;
-    r->hop_count = hops;
-    r->rssi = rssi;
-    r->snr = snr;
-  }
-  // A node's gateway status can change independently of its path metric (e.g. it
-  // becomes a gateway after we first learned it as a plain neighbour). Refresh the
-  // flag on every confirmation, otherwise a stale is_gateway=false hides a gateway
-  // that re-advertises at equal quality and send_to_gateway() finds no route.
-  if (this->update_gateway_state_(r, is_gw)) {
-    changed = true;
-  }
-  r->is_valid = true;
-  r->last_seen = now;
-  r->expires_at = now + this->route_ttl_ms_;
-  if (changed) {
-    this->notify_route_changed_();
-  }
-}
-
-void LoraMesh::expire_routes_() {
-  uint32_t now = millis();
-  bool any = false;
-  for (auto &r : this->routes_) {
-    if (r.is_valid && static_cast<int32_t>(r.expires_at - now) <= 0) {
-      ESP_LOGD(TAG, "Route to 0x%08" PRIX32 " expired", r.dst_id);
-      uint32_t expired_destination = r.dst_id;
-      bool direct_neighbor_expired = r.dst_id == r.next_hop_id;
-      this->hold_down_route_(r, now);
-      any = true;
-      // Passive self-healing (ADR 0002): a direct neighbour going silent
-      // invalidates every Route using it as Next Hop, so those destinations are
-      // re-learned from other neighbours' HELLOs instead of black-holing.
-      if (direct_neighbor_expired) {
-        this->invalidate_routes_via_(expired_destination);
-      }
-    }
-  }
-  if (any) {
-    this->notify_route_changed_();
-  }
-}
-
-void LoraMesh::invalidate_routes_via_(uint32_t neighbor_id) {
-  uint32_t now = millis();
-  for (auto &r : this->routes_) {
-    if (r.is_valid && r.next_hop_id == neighbor_id) {
-      ESP_LOGD(TAG, "Route to 0x%08" PRIX32 " invalidated (next hop 0x%08" PRIX32 " lost)", r.dst_id, neighbor_id);
-      this->hold_down_route_(r, now);
-    }
-  }
-}
-
-bool LoraMesh::is_route_held_down_(uint32_t dst_id, uint8_t candidate_hops) {
-  uint32_t now = millis();
-  for (auto &route : this->routes_) {
-    if (!route.hold_down || route.dst_id != dst_id) {
-      continue;
-    }
-    if (static_cast<int32_t>(route.expires_at - now) <= 0) {
-      route.hold_down = false;
-      return false;
-    }
-    // A count-to-infinity path is necessarily worse than the Route we just
-    // lost. Equal-or-better alternatives are safe and should heal immediately.
-    if (candidate_hops <= route.hop_count) {
-      route.hold_down = false;
-      return false;
-    }
-    return true;
-  }
-  return false;
-}
-
-void LoraMesh::hold_down_route_(RouteEntry &route, uint32_t now) {
-  route.is_valid = false;
-  route.hold_down = true;
-  // One Route lease lets neighbours age out their dependent Route; one expiry
-  // scan interval covers the scheduler's bounded detection granularity.
-  route.expires_at = now + this->route_ttl_ms_ + this->ROUTE_EXPIRY_CHECK_INTERVAL_MS;
-  if (this->queued_hello_state_ != QueuedHelloState::NONE) {
-    this->queued_hello_state_ = QueuedHelloState::STALE;
-  }
-}
-
-void LoraMesh::clear_route_hold_down_(uint32_t dst_id) {
-  for (auto &route : this->routes_) {
-    if (route.hold_down && route.dst_id == dst_id) {
-      route.hold_down = false;
-      return;
-    }
-  }
-}
+bool LoraMesh::has_pending_gateway_updates_() const { return this->routing_table_.has_pending_gateway_updates(); }
 
 void LoraMesh::notify_route_changed_() {
   if (this->queued_hello_state_ != QueuedHelloState::NONE) {
@@ -1106,7 +870,7 @@ void LoraMesh::store_node_name_(uint32_t id, const char *name, uint8_t name_len)
 
   // Map is full: evict a stale entry whose node is no longer in the routing table.
   for (auto &e : this->name_map_) {
-    if (this->find_route_(e.id) == nullptr) {
+    if (this->routing_table_.find(e.id) == nullptr) {
       e.id = id;
       snprintf(e.name, sizeof(e.name), "%.*s", static_cast<int>(len), name);
       // is_valid already true

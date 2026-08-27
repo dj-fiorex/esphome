@@ -131,26 +131,6 @@ static constexpr uint8_t MESH_MAX_ADVERTISED_HOPS = UINT8_MAX - 1;
 // ───────────────────────────────────────────────────────────────────────────
 
 // ───────────────────────────────────────────────────────────────────────────
-// Routing table entry (stored in-memory, not transmitted verbatim)
-// ───────────────────────────────────────────────────────────────────────────
-
-struct RouteEntry {
-  uint32_t dst_id{0};       // Destination node hash
-  uint32_t next_hop_id{0};  // Next hop node hash
-  uint32_t expires_at{0};   // millis() deadline
-  uint32_t last_seen{0};    // millis() of last update
-  float rssi{0.0f};
-  float snr{0.0f};
-  uint8_t hop_count{0};
-  bool is_gateway : 1;
-  bool is_valid : 1;
-  bool gateway_update_pending : 1;
-  bool hold_down : 1;
-
-  RouteEntry() : is_gateway(false), is_valid(false), gateway_update_pending(false), hold_down(false) {}
-};
-
-// ───────────────────────────────────────────────────────────────────────────
 // Seen-packet cache entry (ring buffer for duplicate suppression)
 // ───────────────────────────────────────────────────────────────────────────
 

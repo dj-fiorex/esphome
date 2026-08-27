@@ -27,3 +27,6 @@ How it works:
 
 These complement (not replace) the YAML compile tests in the parent directory,
 which verify config validation and that the component builds for real targets.
+
+`test_route_table.cpp` adds focused coverage at the internal Route lifecycle seam
+selected by ADR-0012. The public behavior cases remain in `test_lora_mesh.cpp`.
