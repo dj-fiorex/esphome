@@ -174,8 +174,8 @@ async def to_code(config) -> None:
         cg.add_define("LORA_MESH_LINK_SIM")
 
     # ── Configuration setters ─────────────────────────────────────────────
-    if CONF_NODE_ID in config:
-        node_id_templ = await cg.templatable(config[CONF_NODE_ID], [], cg.std_string)
+    if (node_id := config.get(CONF_NODE_ID)) is not None:
+        node_id_templ = await cg.templatable(node_id, [], cg.std_string)
         cg.add(var.set_node_id(node_id_templ))
     cg.add(var.set_max_hops(config[CONF_MAX_HOPS]))
     cg.add(
@@ -207,16 +207,20 @@ async def to_code(config) -> None:
         )
 
     # ── Optional diagnostic sensors ───────────────────────────────────────
-    if CONF_NODE_COUNT_SENSOR_ID in config:
-        sens = await cg.get_variable(config[CONF_NODE_COUNT_SENSOR_ID])
+    if (node_count_sensor_id := config.get(CONF_NODE_COUNT_SENSOR_ID)) is not None:
+        sens = await cg.get_variable(node_count_sensor_id)
         cg.add(var.set_node_count_sensor(sens))
 
-    if CONF_GATEWAY_AVAILABLE_SENSOR_ID in config:
-        bs = await cg.get_variable(config[CONF_GATEWAY_AVAILABLE_SENSOR_ID])
+    if (
+        gateway_available_sensor_id := config.get(CONF_GATEWAY_AVAILABLE_SENSOR_ID)
+    ) is not None:
+        bs = await cg.get_variable(gateway_available_sensor_id)
         cg.add(var.set_gateway_available_sensor(bs))
 
-    if CONF_ROUTING_TABLE_SENSOR_ID in config:
-        ts = await cg.get_variable(config[CONF_ROUTING_TABLE_SENSOR_ID])
+    if (
+        routing_table_sensor_id := config.get(CONF_ROUTING_TABLE_SENSOR_ID)
+    ) is not None:
+        ts = await cg.get_variable(routing_table_sensor_id)
         cg.add(var.set_routing_table_sensor(ts))
 
     if (
