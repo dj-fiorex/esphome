@@ -182,8 +182,8 @@ class LoraMesh : public Component {
   bool next_frame_counter_(uint32_t &frame_counter);
 
   // ── Frame counter persistence ─────────────────────────────────────────
-  void persist_frame_counter_();
-  void load_frame_counter_();
+  bool persist_frame_counter_(uint32_t counter);
+  bool load_frame_counter_();
 
   // ── Replay protection ─────────────────────────────────────────────────
   enum class ReplayDecision : uint8_t { ACCEPT, REPLAY, TABLE_FULL };
