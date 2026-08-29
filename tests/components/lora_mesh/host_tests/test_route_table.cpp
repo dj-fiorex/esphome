@@ -73,10 +73,93 @@ static void test_nearest_gateway_order_and_pending_state_are_owned_by_table() {
   EXPECT_FALSE(routes.has_pending_gateway_updates());
 }
 
+static void test_full_table_rejects_worse_newcomer() {
+  RouteTable routes;
+
+  for (uint32_t destination = 100; destination < 100 + LORA_MESH_MAX_ROUTES; ++destination) {
+    EXPECT_TRUE(routes.observe_neighbor(destination, false, -60.0f, 5.0f, 1000).changed);
+  }
+
+  EXPECT_FALSE(routes.consider({999, 2, 10, false, -100.0f, 1.0f}, 2000).changed);
+  EXPECT_EQ(routes.count(), LORA_MESH_MAX_ROUTES);
+  EXPECT_TRUE(routes.find(999) == nullptr);
+  for (uint32_t destination = 100; destination < 100 + LORA_MESH_MAX_ROUTES; ++destination) {
+    EXPECT_TRUE(routes.find(destination) != nullptr);
+  }
+}
+
+static void test_full_table_replaces_worst_route_with_better_newcomer() {
+  RouteTable routes;
+
+  for (uint32_t destination = 100; destination < 100 + LORA_MESH_MAX_ROUTES; ++destination) {
+    uint8_t hop_count = destination == 115 ? 8 : 2;
+    EXPECT_TRUE(routes.consider({destination, 2, hop_count, false, -70.0f, 5.0f}, 1000).changed);
+  }
+
+  EXPECT_TRUE(routes.observe_neighbor(999, false, -80.0f, 3.0f, 2000).changed);
+  EXPECT_EQ(routes.count(), LORA_MESH_MAX_ROUTES);
+  EXPECT_TRUE(routes.find(999) != nullptr);
+  EXPECT_TRUE(routes.find(115) == nullptr);
+  for (uint32_t destination = 100; destination < 115; ++destination) {
+    EXPECT_TRUE(routes.find(destination) != nullptr);
+  }
+}
+
+static void test_full_table_uses_destination_id_to_break_exact_metric_ties() {
+  RouteTable routes;
+
+  for (uint32_t destination = 100; destination < 100 + LORA_MESH_MAX_ROUTES; ++destination) {
+    EXPECT_TRUE(routes.consider({destination, 2, 2, false, -70.0f, 5.0f}, 1000).changed);
+  }
+
+  EXPECT_TRUE(routes.consider({50, 2, 2, false, -70.0f, 5.0f}, 2000).changed);
+  EXPECT_TRUE(routes.find(50) != nullptr);
+  EXPECT_TRUE(routes.find(115) == nullptr);
+  EXPECT_FALSE(routes.consider({200, 2, 2, false, -70.0f, 5.0f}, 3000).changed);
+  EXPECT_TRUE(routes.find(200) == nullptr);
+}
+
+static void test_full_table_preserves_pending_gateway_updates() {
+  RouteTable routes;
+
+  for (uint32_t destination = 100; destination < 100 + LORA_MESH_MAX_ROUTES; ++destination) {
+    EXPECT_TRUE(routes.consider({destination, 2, 8, true, -100.0f, 1.0f}, 1000).changed);
+  }
+
+  EXPECT_FALSE(routes.observe_neighbor(999, false, -40.0f, 10.0f, 2000).changed);
+  EXPECT_TRUE(routes.find(999) == nullptr);
+  EXPECT_TRUE(routes.has_pending_gateway_updates());
+  for (uint32_t destination = 100; destination < 100 + LORA_MESH_MAX_ROUTES; ++destination) {
+    EXPECT_TRUE(routes.find(destination) != nullptr);
+  }
+}
+
+static void test_full_table_preserves_hold_down_tombstones() {
+  RouteTable routes;
+  routes.set_route_ttl(10000);
+
+  for (uint32_t destination = 100; destination < 100 + LORA_MESH_MAX_ROUTES; ++destination) {
+    EXPECT_TRUE(routes.observe_neighbor(destination, false, -60.0f, 5.0f, 1000).changed);
+  }
+  EXPECT_TRUE(routes.expire(11000));
+
+  EXPECT_FALSE(routes.observe_neighbor(999, false, -40.0f, 10.0f, 11001).changed);
+  EXPECT_TRUE(routes.find(999) == nullptr);
+  for (const auto &entry : routes.entries()) {
+    EXPECT_FALSE(entry.is_valid);
+    EXPECT_TRUE(entry.hold_down);
+  }
+}
+
 int main() {
   test_current_path_reconfirmation_refreshes_metrics_and_lease();
   test_expired_neighbor_holds_down_worse_dependent_feedback();
   test_nearest_gateway_order_and_pending_state_are_owned_by_table();
+  test_full_table_rejects_worse_newcomer();
+  test_full_table_replaces_worst_route_with_better_newcomer();
+  test_full_table_uses_destination_id_to_break_exact_metric_ties();
+  test_full_table_preserves_pending_gateway_updates();
+  test_full_table_preserves_hold_down_tombstones();
   printf("%s route_table focused tests (%d failure%s)\n", failures == 0 ? "PASS" : "FAIL", failures,
          failures == 1 ? "" : "s");
   return failures == 0 ? 0 : 1;

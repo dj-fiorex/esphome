@@ -64,7 +64,7 @@ class RouteTable {
 
  private:
   RouteEntry *find_(uint32_t destination_id);
-  RouteEntry *allocate_(uint32_t now);
+  RouteEntry *allocate_(const RouteCandidate &candidate, uint32_t now);
   RouteUpdate update_(const RouteCandidate &candidate, uint32_t now);
   bool is_held_down_(uint32_t destination_id, uint8_t candidate_hops, uint32_t now);
   void clear_hold_down_(uint32_t destination_id);
