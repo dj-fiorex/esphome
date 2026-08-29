@@ -214,8 +214,6 @@ text_sensor:
   - platform: template
     name: "Blocked neighbors"
     id: blocked_neighbors
-    update_interval: 5s
-    lambda: "return id(mesh).get_blocked_neighbors_str();"
 
   - platform: template
     name: "Last message"
@@ -269,6 +267,16 @@ button:
 
 # ── Automated, pausable traffic generators ───────────────────────────────────
 interval:
+  # Format the debug blocklist into bounded caller-owned storage. The owning
+  # get_blocked_neighbors_str() compatibility wrapper remains available for
+  # explicit one-shot use.
+  - interval: 5s
+    then:
+      - lambda: |-
+          char blocked[esphome::lora_mesh::LoraMesh::BLOCKED_NEIGHBORS_TEXT_SIZE];
+          size_t length = id(mesh).write_blocked_neighbors(blocked, sizeof(blocked));
+          id(blocked_neighbors).publish_state(blocked, length);
+
   # Convergecast: each node periodically reports a sequence number to the
   # gateway. On the gateway, "Last message" shows a rolling feed from every
   # node with its hop count — instant proof multi-hop delivery works.

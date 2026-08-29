@@ -166,6 +166,8 @@ lora_mesh:
 
 `nearest_gateway_sensor_id` publishes the eight-character hexadecimal Node ID selected by hops, Path RSSI, and Node
 ID tie-break. `gateway_available_sensor_id` is true when this Node has Upstream Connectivity or can reach a Gateway.
+The text sensor referenced by `routing_table_sensor_id` must not configure text-sensor filters: the shared filter
+pipeline copies its input by value, which would reintroduce recurring heap allocation for the full routing table.
 
 ## Public C++ interface
 
@@ -182,16 +184,26 @@ std::string get_nearest_gateway() const;
 std::string get_node_id() const;
 const char *get_node_name(uint32_t id) const;
 void clear_routes();
+size_t write_routing_table_json(char *buffer, size_t buffer_size) const;
 std::string get_routing_table_json() const;
 size_t get_known_node_count() const;
+#ifdef LORA_MESH_LINK_SIM
+size_t write_blocked_neighbors(char *buffer, size_t buffer_size) const;
+std::string get_blocked_neighbors_str() const;
+#endif
 ```
 
 The byte-span overloads and fixed-capacity packet buffers do not allocate in the send path. Receive decryption uses a
 fixed stack buffer and copies plaintext into the message's inline fixed-capacity payload without allocating. The
 owning buffer, rather than a non-owning view, preserves payload lifetime when ESPHome stores automation arguments for
-later actions. Diagnostic string-returning helpers (`get_routing_table_json()`, `get_nearest_gateway()`, and the
-link-simulator blocklist formatter) retain owning strings because they run only on explicit diagnostic/configuration
-paths, not per-packet builders or dispatch.
+later actions.
+
+Recurring routing-table publication uses bounded reusable storage sized from `max_routes`, and reserves the diagnostic
+text sensor state during setup. `write_routing_table_json()` and, when link simulation is compiled,
+`write_blocked_neighbors()` let other recurring callers provide bounded buffers without allocating. Use
+`ROUTING_TABLE_JSON_BUFFER_SIZE` and `BLOCKED_NEIGHBORS_TEXT_SIZE` respectively for complete output. The existing
+`get_routing_table_json()` and `get_blocked_neighbors_str()` owning-string helpers remain source compatible for
+explicit callers; those compatibility wrappers may allocate.
 
 ## Protocol v4 security
 

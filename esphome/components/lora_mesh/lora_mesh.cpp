@@ -107,6 +107,15 @@ void LoraMesh::setup() {
   this->last_hello_ = millis() - this->discovery_interval_ms_ + jitter_ms;
   this->setup_complete_ = true;
 
+#ifdef USE_TEXT_SENSOR
+  if (this->routing_table_sensor_ != nullptr) {
+    this->routing_table_json_buffer_ = std::make_unique<char[]>(LoraMesh::ROUTING_TABLE_JSON_BUFFER_SIZE);
+    // TextSensor owns its published state. Reserve its maximum possible value
+    // during setup so later route growth cannot allocate in this recurring path.
+    this->routing_table_sensor_->state.reserve(LoraMesh::ROUTING_TABLE_JSON_BUFFER_SIZE - 1);
+  }
+#endif
+
   ESP_LOGI(TAG, "LoraMesh setup: node_id=%s (0x%08" PRIX32 ") fabric_id=0x%08" PRIX32 " upstream=%s",
            this->node_id_str_.c_str(), this->node_id_, this->fabric_id_, this->upstream_connected_ ? "yes" : "no");
 }
@@ -239,36 +248,39 @@ void LoraMesh::clear_routes() {
 
 size_t LoraMesh::get_known_node_count() const { return this->routing_table_.count(); }
 
-std::string LoraMesh::get_routing_table_json() const {
-  // Pre-reserve: each entry is ~90 bytes; +2 for '[' and ']'.
-  size_t entry_count = this->get_known_node_count();
-  std::string out;
-  // Pre-reserve: '[' + ']' + entry_count * ~130 bytes per entry
-  // (~96 base JSON + up to 32 chars for "name" field + commas and overhead).
-  out.reserve(2 + entry_count * 130);
-  out = '[';
+size_t LoraMesh::write_routing_table_json(char *buffer, size_t buffer_size) const {
+  if (buffer == nullptr || buffer_size == 0) {
+    return 0;
+  }
+  size_t position = 0;
+  position = buf_append_str(buffer, buffer_size, position, "[");
   bool first = true;
   for (const auto &r : this->routing_table_.entries()) {
     if (!r.is_valid) {
       continue;
     }
     if (!first) {
-      out += ',';
+      position = buf_append_str(buffer, buffer_size, position, ",");
     }
     first = false;
-    // Buffer: base JSON structure (~96 bytes) + "name" field (up to MESH_NODE_NAME_MAX_LEN=32) + safety margin.
-    char buf[160];
     char dst_hex[9], nh_hex[9];
     LoraMesh::id_to_hex(r.dst_id, dst_hex);
     LoraMesh::id_to_hex(r.next_hop_id, nh_hex);
     const char *name = this->lookup_node_name_(r.dst_id);
-    snprintf(buf, sizeof(buf), R"({"dst":"%s","name":"%s","nh":"%s","hops":%u,"gw":%s,"rssi":%.0f})", dst_hex,
-             name != nullptr ? name : "", nh_hex, r.hop_count, r.is_gateway ? "true" : "false",
-             static_cast<double>(r.rssi));
-    out += buf;
+    position = buf_append_printf(
+        buffer, buffer_size, position, R"({"dst":"%s","name":"%s","nh":"%s","hops":%u,"gw":%s,"rssi":%.0f})", dst_hex,
+        name != nullptr ? name : "", nh_hex, r.hop_count, r.is_gateway ? "true" : "false", static_cast<double>(r.rssi));
   }
-  out += ']';
-  return out;
+  position = buf_append_str(buffer, buffer_size, position, "]");
+  return std::min(position, buffer_size - 1);
+}
+
+std::string LoraMesh::get_routing_table_json() const {
+  const size_t buffer_size = 3 + this->get_known_node_count() * LoraMesh::ROUTING_TABLE_JSON_ENTRY_SIZE;
+  std::string output(buffer_size - 1, '\0');
+  size_t length = this->write_routing_table_json(output.data(), output.size() + 1);
+  output.resize(length);
+  return output;
 }
 
 #ifdef LORA_MESH_LINK_SIM
@@ -306,22 +318,32 @@ bool LoraMesh::is_link_blocked_(uint32_t prev_hop) const {
   return false;
 }
 
-std::string LoraMesh::get_blocked_neighbors_str() const {
-  std::string out;
+size_t LoraMesh::write_blocked_neighbors(char *buffer, size_t buffer_size) const {
+  if (buffer == nullptr || buffer_size == 0) {
+    return 0;
+  }
+  buffer[0] = '\0';
+  size_t position = 0;
   for (size_t i = 0; i < this->blocked_count_; i++) {
     if (i != 0) {
-      out += ", ";
+      position = buf_append_str(buffer, buffer_size, position, ", ");
     }
     const char *name = this->lookup_node_name_(this->blocked_neighbors_[i]);
     if (name != nullptr) {
-      out += name;
+      position = buf_append_str(buffer, buffer_size, position, name);
     } else {
       char hex[9];
       LoraMesh::id_to_hex(this->blocked_neighbors_[i], hex);
-      out += hex;
+      position = buf_append_str(buffer, buffer_size, position, hex);
     }
   }
-  return out;
+  return std::min(position, buffer_size - 1);
+}
+
+std::string LoraMesh::get_blocked_neighbors_str() const {
+  char buffer[LoraMesh::BLOCKED_NEIGHBORS_TEXT_SIZE];
+  size_t length = this->write_blocked_neighbors(buffer, sizeof(buffer));
+  return {buffer, length};
 }
 #endif  // LORA_MESH_LINK_SIM
 
@@ -822,11 +844,18 @@ void LoraMesh::publish_diagnostics_() {
   }
 #endif
 #ifdef USE_TEXT_SENSOR
-  if (this->routing_table_sensor_ != nullptr) {
-    this->routing_table_sensor_->publish_state(this->get_routing_table_json());
+  if (this->routing_table_sensor_ != nullptr && this->routing_table_json_buffer_ != nullptr) {
+    size_t length = this->write_routing_table_json(this->routing_table_json_buffer_.get(),
+                                                   LoraMesh::ROUTING_TABLE_JSON_BUFFER_SIZE);
+    this->routing_table_sensor_->publish_state(this->routing_table_json_buffer_.get(), length);
   }
   if (this->nearest_gateway_sensor_ != nullptr) {
-    this->nearest_gateway_sensor_->publish_state(this->get_nearest_gateway());
+    const RouteEntry *gateway = this->routing_table_.nearest_gateway();
+    char gateway_hex[9]{};
+    if (gateway != nullptr) {
+      LoraMesh::id_to_hex(gateway->dst_id, gateway_hex);
+    }
+    this->nearest_gateway_sensor_->publish_state(gateway_hex);
   }
 #endif
 }
