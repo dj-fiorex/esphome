@@ -2,14 +2,48 @@ import pytest
 
 from esphome import automation, config_validation as cv
 from esphome.components.lora_mesh import CONFIG_SCHEMA
+from esphome.const import KEY_CORE, KEY_TARGET_PLATFORM, Platform, PlatformFramework
+from esphome.core import CORE
+from tests.component_tests.types import SetCoreConfigCallable
 
 VALID_FABRIC_KEY = "00112233445566778899aabbccddeeff"
+
+
+@pytest.fixture(autouse=True)
+def _target_esp32_idf(set_core_config: SetCoreConfigCallable) -> None:
+    set_core_config(PlatformFramework.ESP32_IDF)
 
 
 def _validate_lora_mesh_config(**overrides):
     config = {"radio_id": "mesh_radio", "fabric_key": VALID_FABRIC_KEY}
     config.update(overrides)
     return CONFIG_SCHEMA(config)
+
+
+@pytest.mark.parametrize(
+    "platform_framework",
+    (PlatformFramework.ESP32_ARDUINO, PlatformFramework.ESP32_IDF),
+)
+def test_lora_mesh_accepts_supported_esp32_frameworks(
+    platform_framework: PlatformFramework,
+    set_core_config: SetCoreConfigCallable,
+) -> None:
+    set_core_config(platform_framework)
+
+    _validate_lora_mesh_config()
+
+
+@pytest.mark.parametrize(
+    "platform",
+    tuple(platform for platform in Platform if platform is not Platform.ESP32),
+)
+def test_lora_mesh_rejects_platforms_without_embedded_ccm_support(
+    platform: Platform,
+) -> None:
+    CORE.data[KEY_CORE][KEY_TARGET_PLATFORM] = platform.value
+
+    with pytest.raises(cv.Invalid, match="only available on"):
+        _validate_lora_mesh_config()
 
 
 def test_fabric_key_is_mandatory() -> None:

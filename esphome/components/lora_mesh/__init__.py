@@ -125,7 +125,8 @@ CONFIG_SCHEMA = cv.All(
                 text_sensor.TextSensor
             ),
         }
-    ).extend(cv.COMPONENT_SCHEMA)
+    ).extend(cv.COMPONENT_SCHEMA),
+    cv.only_on_esp32,
 )
 
 # ── Code generation ────────────────────────────────────────────────────────────

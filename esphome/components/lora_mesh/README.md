@@ -7,6 +7,12 @@ or any other upstream technology.
 Every Node shares one mandatory 128-bit Fabric Key. The key derives the public Fabric ID, encrypts and authenticates
 DATA with AES-128-CCM, and derives a separate control-plane key that authenticates every HELLO with HMAC-SHA256.
 
+## Platform support
+
+`lora_mesh` supports ESP32 with either the Arduino or ESP-IDF framework, using SX126x or SX127x radios. Other
+platforms are rejected during configuration because the component's embedded cryptography requires the ESP32 Mbed
+TLS CCM implementation.
+
 ## Core model
 
 - Every Node may Forward packets; Forwarding is not a configured role.
