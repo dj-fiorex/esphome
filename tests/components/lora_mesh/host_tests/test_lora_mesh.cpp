@@ -503,6 +503,17 @@ static void test_unicast_delivered_to_destination() {
   EXPECT_TRUE(std::string(c.received[0].prev_hop) != std::string(c.received[0].source));
 }
 
+static void test_final_destination_accepts_directly_overheard_unicast() {
+  TestNode c("node-c");
+
+  // C can hear A directly even though A selected B as the Next Hop toward C.
+  c.receive(make_data(FABRIC, NODE_A, NODE_C, NODE_B, "water me", 7, 8, 0, NODE_A));
+
+  EXPECT_EQ(c.received.size(), 1u);
+  EXPECT_TRUE(c.received[0].payload == "water me");
+  EXPECT_TRUE(c.received[0].is_for_this_node);
+}
+
 static void test_duplicate_frame_counter_suppressed() {
   TestNode c("node-c");
   auto pkt = make_data(FABRIC, NODE_A, NODE_C, NODE_C, "water me", 7);
@@ -554,6 +565,34 @@ static void test_non_next_hop_relay_does_not_forward_unicast() {
 
   EXPECT_EQ(d.received.size(), 0u);
   EXPECT_EQ(d.radio.sent.size(), 0u);  // single-path: only B forwards
+}
+
+static void test_overheard_non_designated_unicast_does_not_suppress_later_designated_hop() {
+  TestNode d("node-d");
+  d.receive(make_hello(FABRIC, NODE_C, "node-c"));  // D reaches final destination C directly
+  d.radio.sent.clear();
+
+  // D overhears A's earlier transmission to designated Next Hop B.
+  auto packet = make_data(FABRIC, NODE_A, NODE_C, NODE_B, "water me", 7, 8, 0, NODE_A);
+  d.receive(packet);
+  d.mesh.loop();
+  EXPECT_EQ(d.radio.sent.size(), 0u);
+
+  // B legitimately forwards the same authenticated DATA to D. Only mutable
+  // link fields change, so this retains the same (source, frame counter).
+  packet[18] = 7;
+  packet[19] = 1;
+  put_u32_le(&packet[20], NODE_B);
+  put_u32_le(&packet[24], NODE_D);
+  d.receive(packet);
+  d.mesh.loop();
+
+  EXPECT_EQ(d.received.size(), 0u);
+  EXPECT_EQ(d.radio.sent.size(), 1u);
+  if (!d.radio.sent.empty()) {
+    EXPECT_EQ(get_u32_le(&d.radio.sent[0][20]), NODE_D);
+    EXPECT_EQ(get_u32_le(&d.radio.sent[0][24]), NODE_C);
+  }
 }
 
 static void test_forwarder_does_not_return_unicast_to_previous_hop() {
@@ -1812,9 +1851,11 @@ int main() {
   RUN_TEST(test_unicast_send_sets_next_hop_from_routing_table);
   RUN_TEST(test_mac_derived_default_node_id_is_stable_and_addressable);
   RUN_TEST(test_unicast_delivered_to_destination);
+  RUN_TEST(test_final_destination_accepts_directly_overheard_unicast);
   RUN_TEST(test_duplicate_frame_counter_suppressed);
   RUN_TEST(test_designated_next_hop_forwards_and_rewrites_header);
   RUN_TEST(test_non_next_hop_relay_does_not_forward_unicast);
+  RUN_TEST(test_overheard_non_designated_unicast_does_not_suppress_later_designated_hop);
   RUN_TEST(test_forwarder_does_not_return_unicast_to_previous_hop);
   RUN_TEST(test_relay_rebroadcasts_broadcast_and_delivers_it);
   RUN_TEST(test_three_node_line_unicast_and_broadcast);

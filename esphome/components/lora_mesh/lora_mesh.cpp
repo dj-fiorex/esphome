@@ -357,6 +357,13 @@ void LoraMesh::on_radio_packet(const uint8_t *pkt, size_t pkt_len, float rssi, f
     return;
   }
 
+  // A transit unicast overheard before its designated hop must leave no
+  // Seen-cache state, or it would suppress the legitimate later copy.
+  if (header.packet_type == PacketType::DATA && header.dst_id != MESH_BROADCAST_ID && header.dst_id != this->node_id_ &&
+      header.next_hop != this->node_id_) {
+    return;
+  }
+
   // Duplicate suppression.
   if (this->is_duplicate_(header.src_id, header.frame_counter)) {
     ESP_LOGV(TAG, "Duplicate from 0x%08" PRIX32 " frame=%" PRIu32 ", dropped", header.src_id, header.frame_counter);
