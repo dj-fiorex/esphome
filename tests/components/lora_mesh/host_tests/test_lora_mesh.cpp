@@ -1605,6 +1605,27 @@ static void test_modified_data_flags_do_not_reach_application_callback() {
   EXPECT_EQ(b.received.size(), 0u);
 }
 
+static void test_reserved_data_flags_do_not_deliver_forward_or_poison_seen_cache() {
+  TestNode b("node-b");
+  auto reserved = make_data(FABRIC, NODE_A, BROADCAST, BROADCAST, "reserved", 10, 8, 0, NODE_A, 0x04);
+
+  b.receive(reserved);
+  b.mesh.loop();
+
+  EXPECT_EQ(b.received.size(), 0u);
+  EXPECT_EQ(b.radio.sent.size(), 0u);
+
+  auto valid = make_data(FABRIC, NODE_A, BROADCAST, BROADCAST, "valid", 10, 8, 0, NODE_A);
+  b.receive(valid);
+  b.mesh.loop();
+
+  EXPECT_EQ(b.received.size(), 1u);
+  EXPECT_EQ(b.radio.sent.size(), 1u);
+  if (!b.received.empty()) {
+    EXPECT_TRUE(b.received[0].payload == "valid");
+  }
+}
+
 static void test_data_with_trailing_bytes_does_not_reach_application_callback() {
   TestNode b("node-b");
   auto pkt = make_data(FABRIC, NODE_A, NODE_B, NODE_B, "authentic", 10, 8, 0, NODE_A);
@@ -1903,6 +1924,7 @@ int main() {
   RUN_TEST(test_modified_transit_unicast_data_is_not_forwarded);
   RUN_TEST(test_modified_data_cannot_poison_seen_cache);
   RUN_TEST(test_modified_data_flags_do_not_reach_application_callback);
+  RUN_TEST(test_reserved_data_flags_do_not_deliver_forward_or_poison_seen_cache);
   RUN_TEST(test_data_with_trailing_bytes_does_not_reach_application_callback);
   RUN_TEST(test_protocol_v3_four_byte_data_tag_is_rejected);
   RUN_TEST(test_protocol_v3_four_byte_data_tag_is_not_forwarded);
