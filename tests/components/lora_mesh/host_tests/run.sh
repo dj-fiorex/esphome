@@ -36,6 +36,19 @@ c++ -std=gnu++20 -g -Wall -Wextra -Wno-unused-parameter -DESPHOME_LOG_LEVEL=1 \
 
 "$BUILD_DIR/test_outbound_airtime"
 
+c++ -std=gnu++20 -g -Wall -Wextra -Wno-unused-parameter -DESPHOME_LOG_LEVEL=1 -DUSE_TEXT_SENSOR \
+  -DLORA_MESH_MAX_ROUTES=255 \
+  -I"$HERE/stub_include" -I"$ROOT" \
+  "$HERE/test_diagnostics.cpp" \
+  "$HERE/stubs.cpp" \
+  "$ROOT/esphome/components/lora_mesh/lora_mesh.cpp" \
+  "$ROOT/esphome/components/lora_mesh/outbound_airtime.cpp" \
+  "$ROOT/esphome/components/lora_mesh/packet_admission.cpp" \
+  "$ROOT/esphome/components/lora_mesh/route_table.cpp" \
+  -o "$BUILD_DIR/test_diagnostics"
+
+"$BUILD_DIR/test_diagnostics"
+
 c++ -std=gnu++20 -g -Wall -Wextra -Wno-unused-parameter -DESPHOME_LOG_LEVEL=5 -DLORA_MESH_LINK_SIM \
   -I"$HERE/stub_include" -I"$ROOT" \
   "$HERE/test_link_sim_admission.cpp" \

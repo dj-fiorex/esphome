@@ -12,9 +12,9 @@ tests/components/lora_mesh/host_tests/run.sh
 
 How it works:
 
-- `lora_mesh.cpp` is compiled against the real `esphome/` headers; only
-  `esphome/core/defines.h` is shadowed by `stub_include/` so no optional
-  feature (sensors or radio drivers) is pulled in.
+- `lora_mesh.cpp` is compiled against the real `esphome/` headers. The host
+  stubs shadow `esphome/core/defines.h` to keep optional features out of the
+  default suite and provide a fixed test TextSensor for diagnostic publication.
 - `stubs.cpp` provides the handful of runtime symbols the component links
   against (`millis()` as a controllable fake clock, `random_uint32()`,
   `Component` method definitions).
@@ -31,4 +31,6 @@ which verify config validation and that the component builds for real targets.
 `test_route_table.cpp`, `test_packet_admission.cpp`, and `test_outbound_airtime.cpp`
 add focused coverage at the internal seams documented by ADR-0012. The public
 behavior cases remain in `test_lora_mesh.cpp`; `test_link_sim_admission.cpp`
-checks the staged admission ordering through the public link-simulation API.
+checks staged admission and allocation-free formatting through the public
+link-simulation API. `test_diagnostics.cpp` counts allocations across public
+route-change and periodic diagnostic publication with the maximum 255 Routes.

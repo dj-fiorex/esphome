@@ -23,6 +23,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 
@@ -36,6 +37,14 @@ namespace esphome::lora_mesh {
 
 class LoraMesh : public Component {
  public:
+  // Includes separators, brackets, and the null terminator for the largest
+  // supported routing table and every maximum-length Node name.
+  static constexpr size_t ROUTING_TABLE_JSON_ENTRY_SIZE = 160;
+  static constexpr size_t ROUTING_TABLE_JSON_BUFFER_SIZE = 3 + LORA_MESH_MAX_ROUTES * ROUTING_TABLE_JSON_ENTRY_SIZE;
+#ifdef LORA_MESH_LINK_SIM
+  static constexpr size_t BLOCKED_NEIGHBORS_TEXT_SIZE = 4 * MESH_NODE_NAME_MAX_LEN + 7;
+#endif
+
   explicit LoraMesh(const std::string &fabric_key_hex, LoRaRadio *radio);
 
   // ── Component lifecycle ──────────────────────────────────────────────────
@@ -85,6 +94,9 @@ class LoraMesh : public Component {
   /** Returns the human-readable name for a node hash, or nullptr if unknown. */
   const char *get_node_name(uint32_t id) const;
   void clear_routes();
+  /** Write routing-table JSON without allocating; use ROUTING_TABLE_JSON_BUFFER_SIZE for complete output. */
+  size_t write_routing_table_json(char *buffer, size_t buffer_size) const;
+  /** Compatibility wrapper for explicit callers that need an owning string. */
   std::string get_routing_table_json() const;
   size_t get_known_node_count() const;
 
@@ -99,6 +111,8 @@ class LoraMesh : public Component {
   /** Clear the link-sim blocklist (restore full connectivity). */
   void clear_blocked_neighbors();
   /** Comma-separated list of currently blocked neighbours (name if known, else hex). */
+  size_t write_blocked_neighbors(char *buffer, size_t buffer_size) const;
+  /** Compatibility wrapper for explicit callers that need an owning string. */
   std::string get_blocked_neighbors_str() const;
 #endif
 
@@ -266,6 +280,7 @@ class LoraMesh : public Component {
 #ifdef USE_TEXT_SENSOR
   text_sensor::TextSensor *routing_table_sensor_{nullptr};
   text_sensor::TextSensor *nearest_gateway_sensor_{nullptr};
+  std::unique_ptr<char[]> routing_table_json_buffer_;
 #endif
 };
 
