@@ -40,9 +40,10 @@ void OutboundAirtime::drain(uint32_t now) {
     return;
   }
   if (!this->backoff_armed_) {
-    // Widen before adding one so the inclusive range cannot wrap to zero.
-    uint64_t jitter_range = static_cast<uint64_t>(this->jitter_ms_) + 1;
-    uint32_t backoff = this->jitter_ms_ > 0 ? static_cast<uint32_t>(random_uint32() % jitter_range) : 0;
+    // set_jitter() caps this at INT32_MAX, so the inclusive range remains a
+    // nonzero uint32_t and avoids a software 64-bit remainder on ESP32.
+    uint32_t jitter_range = this->jitter_ms_ + 1u;
+    uint32_t backoff = this->jitter_ms_ > 0 ? random_uint32() % jitter_range : 0;
     this->next_tx_at_ = now + backoff;
     this->backoff_armed_ = true;
   }
