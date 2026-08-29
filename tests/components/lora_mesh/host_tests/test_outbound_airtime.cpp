@@ -1,6 +1,7 @@
 #include "esphome/components/lora_mesh/outbound_airtime.h"
 
 #include <cstdio>
+#include <limits>
 #include <vector>
 
 namespace esphome {
@@ -78,6 +79,25 @@ static void test_jitter_and_fifo_are_owned_by_airtime_module() {
   EXPECT_EQ(radio.attempted[0][0], 1u);
 }
 
+static void test_jitter_is_clamped_and_ordered_across_millis_rollover() {
+  FakeRadio radio;
+  HelloHooks hooks;
+  OutboundAirtime airtime(&radio, &hooks, refresh_hello, hello_attempted);
+  airtime.set_jitter(std::numeric_limits<uint32_t>::max());
+  EXPECT_EQ(airtime.get_jitter(), OutboundAirtime::MAX_JITTER_MS);
+  EXPECT_TRUE(airtime.enqueue(packet_with(1)));
+
+  esphome::test_random_set(std::numeric_limits<uint32_t>::max());
+  constexpr uint32_t now = std::numeric_limits<uint32_t>::max() - 1000;
+  constexpr uint32_t deadline = now + OutboundAirtime::MAX_JITTER_MS;
+  airtime.drain(now);
+  airtime.drain(deadline - 1);
+  EXPECT_EQ(radio.attempted.size(), 0u);
+
+  airtime.drain(deadline);
+  EXPECT_EQ(radio.attempted.size(), 1u);
+}
+
 static void test_failed_attempt_is_dropped_without_retry() {
   FakeRadio radio;
   HelloHooks hooks;
@@ -113,6 +133,7 @@ static void test_stale_hello_is_refreshed_at_airtime_and_reported() {
 
 int main() {
   test_jitter_and_fifo_are_owned_by_airtime_module();
+  test_jitter_is_clamped_and_ordered_across_millis_rollover();
   test_failed_attempt_is_dropped_without_retry();
   test_stale_hello_is_refreshed_at_airtime_and_reported();
   printf("%s outbound_airtime focused tests (%d failure%s)\n", failures == 0 ? "PASS" : "FAIL", failures,

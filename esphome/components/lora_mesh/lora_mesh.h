@@ -37,6 +37,7 @@ namespace esphome::lora_mesh {
 
 class LoraMesh : public Component {
  public:
+  static constexpr uint32_t MAX_SEEN_CACHE_TTL_MS = 0x7FFFFFFFu;
   // Includes separators, brackets, and the null terminator for the largest
   // supported routing table and every maximum-length Node name.
   static constexpr size_t ROUTING_TABLE_JSON_ENTRY_SIZE = 160;
@@ -68,7 +69,9 @@ class LoraMesh : public Component {
   }
   void set_discovery_interval(uint32_t ms) { this->discovery_interval_ms_ = ms; }
   void set_route_ttl(uint32_t ms) { this->routing_table_.set_route_ttl(ms); }
-  void set_seen_cache_ttl(uint32_t ms) { this->seen_cache_ttl_ms_ = ms; }
+  void set_seen_cache_ttl(uint32_t ms) {
+    this->seen_cache_ttl_ms_ = ms > LoraMesh::MAX_SEEN_CACHE_TTL_MS ? LoraMesh::MAX_SEEN_CACHE_TTL_MS : ms;
+  }
   void set_forward_messages(bool forward) { this->forward_messages_ = forward; }
   void set_tx_jitter(uint32_t ms) { this->outbound_airtime_.set_jitter(ms); }
 

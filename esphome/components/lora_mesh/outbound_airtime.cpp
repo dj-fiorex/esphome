@@ -40,7 +40,9 @@ void OutboundAirtime::drain(uint32_t now) {
     return;
   }
   if (!this->backoff_armed_) {
-    uint32_t backoff = this->jitter_ms_ > 0 ? random_uint32() % (this->jitter_ms_ + 1) : 0;
+    // Widen before adding one so the inclusive range cannot wrap to zero.
+    uint64_t jitter_range = static_cast<uint64_t>(this->jitter_ms_) + 1;
+    uint32_t backoff = this->jitter_ms_ > 0 ? static_cast<uint32_t>(random_uint32() % jitter_range) : 0;
     this->next_tx_at_ = now + backoff;
     this->backoff_armed_ = true;
   }
