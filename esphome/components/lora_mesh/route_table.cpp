@@ -8,10 +8,16 @@ namespace esphome::lora_mesh {
 
 [[maybe_unused]] static const char *const TAG = "lora_mesh";
 
-static bool is_preferred_gateway_route(const RouteEntry &candidate, const RouteEntry *current) {
-  return current == nullptr || candidate.hop_count < current->hop_count ||
-         (candidate.hop_count == current->hop_count &&
-          (candidate.rssi > current->rssi || (candidate.rssi == current->rssi && candidate.dst_id < current->dst_id)));
+static bool is_preferred_route(uint8_t candidate_hops, float candidate_rssi, uint32_t candidate_destination,
+                               const RouteEntry *current) {
+  return current == nullptr || candidate_hops < current->hop_count ||
+         (candidate_hops == current->hop_count &&
+          (candidate_rssi > current->rssi ||
+           (candidate_rssi == current->rssi && candidate_destination < current->dst_id)));
+}
+
+static bool is_preferred_route(const RouteEntry &candidate, const RouteEntry *current) {
+  return is_preferred_route(candidate.hop_count, candidate.rssi, candidate.dst_id, current);
 }
 
 RouteUpdate RouteTable::observe_neighbor(uint32_t node_id, bool is_gateway, float rssi, float snr, uint32_t now) {
@@ -77,7 +83,7 @@ const RouteEntry *RouteTable::find(uint32_t destination_id) const {
 const RouteEntry *RouteTable::nearest_gateway() const {
   const RouteEntry *nearest = nullptr;
   for (const auto &route : this->entries_) {
-    if (route.is_valid && route.is_gateway && is_preferred_gateway_route(route, nearest)) {
+    if (route.is_valid && route.is_gateway && is_preferred_route(route, nearest)) {
       nearest = &route;
     }
   }
@@ -119,7 +125,7 @@ RouteEntry *RouteTable::find_(uint32_t destination_id) {
   return nullptr;
 }
 
-RouteEntry *RouteTable::allocate_(uint32_t now) {
+RouteEntry *RouteTable::allocate_(const RouteCandidate &candidate, uint32_t now) {
   for (auto &route : this->entries_) {
     if (!route.is_valid) {
       if (route.hold_down && static_cast<int32_t>(route.expires_at - now) > 0) {
@@ -135,16 +141,18 @@ RouteEntry *RouteTable::allocate_(uint32_t now) {
     if (!route.is_valid || route.gateway_update_pending) {
       continue;
     }
-    if (worst == nullptr || route.hop_count > worst->hop_count ||
-        (route.hop_count == worst->hop_count && route.rssi < worst->rssi)) {
+    if (worst == nullptr || is_preferred_route(*worst, &route)) {
       worst = &route;
     }
   }
-  if (worst != nullptr) {
+  bool candidate_is_better =
+      worst != nullptr && is_preferred_route(candidate.hop_count, candidate.path_rssi, candidate.destination_id, worst);
+  if (candidate_is_better) {
     ESP_LOGD(TAG, "Route table full, evicting 0x%08" PRIX32, worst->dst_id);
     worst->is_valid = false;
   } else {
-    ESP_LOGD(TAG, "Route table full of pending Gateway updates, deferring new Route");
+    ESP_LOGD(TAG, "Route table full with no worse evictable Route, deferring new Route");
+    worst = nullptr;
   }
   return worst;
 }
@@ -157,7 +165,7 @@ RouteUpdate RouteTable::update_(const RouteCandidate &candidate, uint32_t now) {
   RouteEntry *route = this->find_(candidate.destination_id);
   bool changed = false;
   if (route == nullptr) {
-    route = this->allocate_(now);
+    route = this->allocate_(candidate, now);
     if (route == nullptr) {
       return {};
     }
