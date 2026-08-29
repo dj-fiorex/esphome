@@ -144,6 +144,39 @@ def test_discovery_interval_defaults_to_thirty_seconds() -> None:
     assert config["discovery_interval"].total_milliseconds == 30_000
 
 
+def test_route_ttl_accepts_largest_wrap_safe_hold_down_duration() -> None:
+    config = _validate_lora_mesh_config(route_ttl="2147473647ms")
+
+    assert config["route_ttl"].total_milliseconds == 2_147_473_647
+
+
+def test_route_ttl_rejects_duration_that_makes_hold_down_ambiguous() -> None:
+    with pytest.raises(cv.Invalid):
+        _validate_lora_mesh_config(route_ttl="2147473648ms")
+
+
+def test_seen_cache_ttl_accepts_largest_wrap_safe_duration() -> None:
+    config = _validate_lora_mesh_config(seen_cache_ttl="2147483647ms")
+
+    assert config["seen_cache_ttl"].total_milliseconds == 2_147_483_647
+
+
+def test_seen_cache_ttl_rejects_ambiguous_signed_deadline_duration() -> None:
+    with pytest.raises(cv.Invalid):
+        _validate_lora_mesh_config(seen_cache_ttl="2147483648ms")
+
+
+def test_tx_jitter_accepts_largest_wrap_safe_duration() -> None:
+    config = _validate_lora_mesh_config(tx_jitter="2147483647ms")
+
+    assert config["tx_jitter"].total_milliseconds == 2_147_483_647
+
+
+def test_tx_jitter_rejects_ambiguous_signed_deadline_duration() -> None:
+    with pytest.raises(cv.Invalid):
+        _validate_lora_mesh_config(tx_jitter="2147483648ms")
+
+
 def test_max_hops_rejects_route_length_that_cannot_be_advertised() -> None:
     with pytest.raises(cv.Invalid):
         _validate_lora_mesh_config(max_hops=255)

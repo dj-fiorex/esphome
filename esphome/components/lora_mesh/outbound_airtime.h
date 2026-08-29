@@ -17,13 +17,16 @@ enum class OutboundPacketKind : uint8_t { DATA = 0, HELLO };
 
 class OutboundAirtime {
  public:
+  static constexpr uint32_t MAX_JITTER_MS = 0x7FFFFFFFu;
   using RefreshHello = Packet (*)(void *context);
   using HelloAttempted = void (*)(void *context, const Packet &packet);
 
   OutboundAirtime(LoRaRadio *radio, void *context, RefreshHello refresh_hello, HelloAttempted hello_attempted)
       : radio_(radio), context_(context), refresh_hello_(refresh_hello), hello_attempted_(hello_attempted) {}
 
-  void set_jitter(uint32_t jitter_ms) { this->jitter_ms_ = jitter_ms; }
+  void set_jitter(uint32_t jitter_ms) {
+    this->jitter_ms_ = jitter_ms > OutboundAirtime::MAX_JITTER_MS ? OutboundAirtime::MAX_JITTER_MS : jitter_ms;
+  }
   uint32_t get_jitter() const { return this->jitter_ms_; }
   size_t capacity() const { return this->queue_.size(); }
 

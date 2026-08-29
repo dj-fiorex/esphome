@@ -32,6 +32,13 @@ CONF_LINK_SIM = "link_sim"
 CONF_DESTINATION = "destination"
 CONF_CONNECTED = "connected"
 
+# Deadlines compared through signed 32-bit deltas must stay within half of the
+# uint32_t millis() range. Route hold-down extends the configured lease by one
+# expiry scan interval, so reserve that extension in the Route TTL limit.
+MAX_WRAP_SAFE_DELAY_MS = 0x7FFFFFFF
+ROUTE_EXPIRY_SCAN_INTERVAL_MS = 10_000
+MAX_ROUTE_TTL_MS = MAX_WRAP_SAFE_DELAY_MS - ROUTE_EXPIRY_SCAN_INTERVAL_MS
+
 CONF_ON_ROUTE_UPDATE = "on_route_update"
 CONF_NODE_COUNT_SENSOR_ID = "node_count_sensor_id"
 CONF_GATEWAY_AVAILABLE_SENSOR_ID = "gateway_available_sensor_id"
@@ -91,20 +98,23 @@ CONFIG_SCHEMA = cv.All(
                 cv.positive_time_period_milliseconds,
                 cv.Range(min=cv.TimePeriod(milliseconds=5)),
             ),
-            cv.Optional(
-                CONF_ROUTE_TTL, default="90s"
-            ): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_ROUTE_TTL, default="90s"): cv.All(
+                cv.positive_time_period_milliseconds,
+                cv.Range(max=cv.TimePeriod(milliseconds=MAX_ROUTE_TTL_MS)),
+            ),
             cv.Optional(CONF_MAX_ROUTES, default=16): cv.int_range(min=4, max=255),
             cv.Optional(CONF_SEEN_CACHE_SIZE, default=32): cv.int_range(min=8, max=255),
-            cv.Optional(
-                CONF_SEEN_CACHE_TTL, default="2min"
-            ): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_SEEN_CACHE_TTL, default="2min"): cv.All(
+                cv.positive_time_period_milliseconds,
+                cv.Range(max=cv.TimePeriod(milliseconds=MAX_WRAP_SAFE_DELAY_MS)),
+            ),
             cv.Optional(CONF_FORWARD_MESSAGES, default=True): cv.boolean,
             # TX queue: bounded outgoing queue drained one packet per loop,
             # with a random pre-send backoff in [0, tx_jitter].
-            cv.Optional(
-                CONF_TX_JITTER, default="100ms"
-            ): cv.positive_time_period_milliseconds,
+            cv.Optional(CONF_TX_JITTER, default="100ms"): cv.All(
+                cv.positive_time_period_milliseconds,
+                cv.Range(max=cv.TimePeriod(milliseconds=MAX_WRAP_SAFE_DELAY_MS)),
+            ),
             cv.Optional(CONF_TX_QUEUE_SIZE, default=8): cv.int_range(min=2, max=32),
             # Link simulator (debug/test only): when enabled, the node can be
             # told at runtime to drop packets whose immediate sender (prev_hop)

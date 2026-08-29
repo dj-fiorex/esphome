@@ -55,12 +55,12 @@ lora_mesh:
 | `node_id` | MAC-derived | Templatable human-readable Node ID. |
 | `max_hops` | `8` | Maximum new-packet TTL and accepted Route length (`1` through `254`). |
 | `discovery_interval` | `30s` | Periodic authenticated HELLO interval; minimum `5ms`. |
-| `route_ttl` | `90s` | Route lease; the default detects abrupt loss after about three missed HELLOs. |
+| `route_ttl` | `90s` | Route lease; the default detects abrupt loss after about three missed HELLOs. Maximum `2147473647ms`. |
 | `max_routes` | `16` | Compile-time Route-table capacity. |
 | `seen_cache_size` | `32` | Compile-time duplicate Seen-cache capacity. |
-| `seen_cache_ttl` | `2min` | Duplicate Seen-cache lifetime. |
+| `seen_cache_ttl` | `2min` | Duplicate Seen-cache lifetime. Maximum `2147483647ms`. |
 | `forward_messages` | `true` | Whether eligible DATA is Forwarded. |
-| `tx_jitter` | `100ms` | Random backoff before each queued radio transmission. |
+| `tx_jitter` | `100ms` | Random backoff before each queued radio transmission. Maximum `2147483647ms`. |
 | `tx_queue_size` | `8` | Compile-time bounded TX queue capacity. |
 | `link_sim` | `false` | Debug-only neighbour blocklist used by the three-board test. |
 

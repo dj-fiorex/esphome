@@ -1,6 +1,7 @@
 #include "esphome/components/lora_mesh/route_table.h"
 
 #include <cstdio>
+#include <limits>
 
 using esphome::lora_mesh::RouteCandidate;
 using esphome::lora_mesh::RouteTable;
@@ -34,6 +35,29 @@ static void test_current_path_reconfirmation_refreshes_metrics_and_lease() {
     EXPECT_EQ(route->snr, -4.0f);
     EXPECT_EQ(route->expires_at, 32000u);
   }
+}
+
+static void test_route_ttl_is_clamped_to_wrap_safe_hold_down_limit() {
+  RouteTable routes;
+
+  routes.set_route_ttl(std::numeric_limits<uint32_t>::max());
+
+  EXPECT_EQ(routes.get_route_ttl(), RouteTable::MAX_ROUTE_TTL_MS);
+}
+
+static void test_maximum_route_ttl_remains_ordered_across_millis_rollover() {
+  RouteTable routes;
+  routes.set_route_ttl(RouteTable::MAX_ROUTE_TTL_MS);
+  constexpr uint32_t observed_at = std::numeric_limits<uint32_t>::max() - 1000;
+  constexpr uint32_t route_deadline = observed_at + RouteTable::MAX_ROUTE_TTL_MS;
+
+  routes.observe_neighbor(2, false, -50.0f, 8.0f, observed_at);
+  EXPECT_FALSE(routes.expire(route_deadline - 1));
+  EXPECT_TRUE(routes.expire(route_deadline));
+
+  constexpr uint32_t hold_down_deadline = route_deadline + 0x7FFFFFFFu;
+  EXPECT_FALSE(routes.consider({2, 3, 2, false, -60.0f, 5.0f}, hold_down_deadline - 1).changed);
+  EXPECT_TRUE(routes.consider({2, 3, 2, false, -60.0f, 5.0f}, hold_down_deadline).changed);
 }
 
 static void test_expired_neighbor_holds_down_worse_dependent_feedback() {
@@ -153,6 +177,8 @@ static void test_full_table_preserves_hold_down_tombstones() {
 
 int main() {
   test_current_path_reconfirmation_refreshes_metrics_and_lease();
+  test_route_ttl_is_clamped_to_wrap_safe_hold_down_limit();
+  test_maximum_route_ttl_remains_ordered_across_millis_rollover();
   test_expired_neighbor_holds_down_worse_dependent_feedback();
   test_nearest_gateway_order_and_pending_state_are_owned_by_table();
   test_full_table_rejects_worse_newcomer();

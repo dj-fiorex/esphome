@@ -45,8 +45,13 @@ struct RouteUpdate {
 class RouteTable {
  public:
   static constexpr uint32_t EXPIRY_SCAN_INTERVAL_MS = 10000;
+  // Signed deadline deltas are unambiguous for at most INT32_MAX ms. A
+  // hold-down adds one scan interval to the configured Route lease.
+  static constexpr uint32_t MAX_ROUTE_TTL_MS = 0x7FFFFFFFu - EXPIRY_SCAN_INTERVAL_MS;
 
-  void set_route_ttl(uint32_t route_ttl_ms) { this->route_ttl_ms_ = route_ttl_ms; }
+  void set_route_ttl(uint32_t route_ttl_ms) {
+    this->route_ttl_ms_ = route_ttl_ms > RouteTable::MAX_ROUTE_TTL_MS ? RouteTable::MAX_ROUTE_TTL_MS : route_ttl_ms;
+  }
   uint32_t get_route_ttl() const { return this->route_ttl_ms_; }
 
   RouteUpdate observe_neighbor(uint32_t node_id, bool is_gateway, float rssi, float snr, uint32_t now);
