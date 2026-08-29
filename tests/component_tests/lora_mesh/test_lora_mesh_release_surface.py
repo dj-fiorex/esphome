@@ -9,6 +9,20 @@ SCENARIO_PATH = Path("tests/components/lora_mesh/three-pot.esp32-s3-idf.yaml")
 SCENARIO_SECRETS_EXAMPLE_PATH = SCENARIO_PATH.parent / "secrets.example.yaml"
 THREE_POT_GUIDE_PATH = Path("esphome/components/lora_mesh/docs/three-pot-scenario.md")
 WIRE_FORMAT_PATH = Path("esphome/components/lora_mesh/docs/wire-format.md")
+SUPPORTED_COMPILE_FIXTURES = {
+    Path("tests/components/lora_mesh/test.esp32-ard.yaml"),
+    Path("tests/components/lora_mesh/test.esp32-idf.yaml"),
+    Path("tests/components/lora_mesh/test-sx127x.esp32-ard.yaml"),
+    Path("tests/components/lora_mesh/test-sx127x.esp32-idf.yaml"),
+}
+
+
+def test_supported_frameworks_and_radio_adapters_have_compile_fixtures() -> None:
+    component_tests = get_component_test_files("lora_mesh", all_variants=True)
+
+    assert {path.resolve() for path in SUPPORTED_COMPILE_FIXTURES} <= {
+        path.resolve() for path in component_tests
+    }
 
 
 def test_three_pot_scenario_is_an_esp32_idf_compile_fixture() -> None:
