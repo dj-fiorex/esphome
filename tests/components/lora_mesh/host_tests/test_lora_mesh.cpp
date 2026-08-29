@@ -1680,6 +1680,77 @@ static void test_frame_counter_persists_across_reboot() {
   }
 }
 
+static void test_power_loss_after_data_send_does_not_reuse_frame_counter() {
+  uint32_t first_counter = 0;
+  {
+    TestNode before_power_loss("node-a");
+    EXPECT_TRUE(before_power_loss.mesh.broadcast_message("before-power-loss"));
+    before_power_loss.mesh.loop();
+    EXPECT_EQ(before_power_loss.radio.sent.size(), 1u);
+    first_counter = get_u32_le(&before_power_loss.radio.sent[0][14]);
+  }
+
+  esphome::test_preferences_simulate_power_loss();
+
+  TestNode after_power_loss("node-a");
+  EXPECT_TRUE(after_power_loss.mesh.broadcast_message("after-power-loss"));
+  after_power_loss.mesh.loop();
+  EXPECT_EQ(after_power_loss.radio.sent.size(), 1u);
+  EXPECT_TRUE(get_u32_le(&after_power_loss.radio.sent[0][14]) > first_counter);
+}
+
+static void test_setup_save_failure_permanently_refuses_origination() {
+  esphome::test_preferences_set_save_succeeds(false);
+  TestNode failed_setup("node-a");
+
+  EXPECT_FALSE(failed_setup.mesh.broadcast_message("while-save-fails"));
+  esphome::test_preferences_set_save_succeeds(true);
+  EXPECT_FALSE(failed_setup.mesh.broadcast_message("after-save-recovers"));
+  failed_setup.mesh.loop();
+  EXPECT_EQ(failed_setup.radio.sent.size(), 0u);
+}
+
+static void test_setup_sync_failure_permanently_refuses_origination() {
+  esphome::test_preferences_set_sync_succeeds(false);
+  TestNode failed_setup("node-a");
+
+  EXPECT_FALSE(failed_setup.mesh.broadcast_message("while-sync-fails"));
+  esphome::test_preferences_set_sync_succeeds(true);
+  EXPECT_FALSE(failed_setup.mesh.broadcast_message("after-sync-recovers"));
+  failed_setup.mesh.loop();
+  EXPECT_EQ(failed_setup.radio.sent.size(), 0u);
+}
+
+static void test_runtime_rollover_refuses_data_until_reservation_is_durable() {
+  constexpr uint32_t max_counter = std::numeric_limits<uint32_t>::max();
+  const uint32_t preference_key = fnv1a_str("lora_mesh_fc_node-a");
+  esphome::test_preferences_put_u32(preference_key, max_counter - 2);
+  TestNode a("node-a");
+
+  esphome::test_preferences_set_sync_succeeds(false);
+  EXPECT_FALSE(a.mesh.broadcast_message("sync-failed"));
+  a.mesh.loop();
+  EXPECT_EQ(a.radio.sent.size(), 0u);
+
+  esphome::test_preferences_set_sync_succeeds(true);
+  EXPECT_TRUE(a.mesh.broadcast_message("sync-recovered"));
+  a.mesh.loop();
+  EXPECT_EQ(a.radio.sent.size(), 1u);
+  EXPECT_EQ(get_u32_le(&a.radio.sent[0][14]), max_counter);
+  EXPECT_FALSE(a.mesh.broadcast_message("exhausted"));
+}
+
+static void test_frame_counter_reservation_remains_batched() {
+  const uint32_t preference_key = fnv1a_str("lora_mesh_fc_node-a");
+  TestNode a("node-a");
+  EXPECT_EQ(esphome::test_preferences_get_u32(preference_key), 1000u);
+
+  EXPECT_TRUE(a.mesh.broadcast_message("one"));
+  EXPECT_TRUE(a.mesh.broadcast_message("two"));
+  EXPECT_TRUE(a.mesh.broadcast_message("three"));
+  EXPECT_EQ(esphome::test_preferences_get_u32(preference_key), 1000u);
+}
+
 static void test_final_frame_counter_is_reserved_and_used_only_once() {
   constexpr uint32_t max_counter = std::numeric_limits<uint32_t>::max();
   const uint32_t preference_key = fnv1a_str("lora_mesh_fc_node-a");
@@ -1797,6 +1868,11 @@ int main() {
   RUN_TEST(test_replay_rejected);
   RUN_TEST(test_replay_table_pressure_fails_closed_without_forgetting_known_sources);
   RUN_TEST(test_frame_counter_persists_across_reboot);
+  RUN_TEST(test_power_loss_after_data_send_does_not_reuse_frame_counter);
+  RUN_TEST(test_setup_save_failure_permanently_refuses_origination);
+  RUN_TEST(test_setup_sync_failure_permanently_refuses_origination);
+  RUN_TEST(test_runtime_rollover_refuses_data_until_reservation_is_durable);
+  RUN_TEST(test_frame_counter_reservation_remains_batched);
   RUN_TEST(test_final_frame_counter_is_reserved_and_used_only_once);
   RUN_TEST(test_reboot_at_frame_counter_exhaustion_refuses_all_data_sends);
   printf("\n%s (%d failure%s)\n", g_failures == 0 ? "OK" : "FAILED", g_failures, g_failures == 1 ? "" : "s");

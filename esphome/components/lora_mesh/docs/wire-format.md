@@ -111,8 +111,10 @@ Routes still valid after expiry.
 ## Persistent counters and replay protection
 
 The sender counter is part of the CCM nonce, so a Node must not reuse it with the same Fabric Key and source ID.
-The component writes a counter reservation ahead to ESPHome preferences in batches of 1000. After reboot it
-resumes from the reserved value, safely skipping unused values instead of risking reuse.
+The component writes a counter reservation ahead to ESPHome preferences in batches of 1000 and synchronously commits
+each reservation before using its range. Setup fails closed if the initial reservation cannot be made durable, and
+runtime origination pauses at a range boundary until the next reservation is durable. After reboot it resumes from
+the reserved value, safely skipping unused values instead of risking reuse.
 
 Receivers keep a runtime high-water counter per source. After successful tag verification they reject counters at
 or below the high-water value, then advance it for accepted DATA. The receiver high-water table is intentionally

@@ -179,11 +179,6 @@ class LoraMesh : public Component {
     return {reinterpret_cast<const uint8_t *>(payload.data()), payload.size()};
   }
   static void id_to_hex(uint32_t id, char out[9]);
-  bool next_frame_counter_(uint32_t &frame_counter);
-
-  // ── Frame counter persistence ─────────────────────────────────────────
-  void persist_frame_counter_();
-  void load_frame_counter_();
 
   // ── Replay protection ─────────────────────────────────────────────────
   enum class ReplayDecision : uint8_t { ACCEPT, REPLAY, TABLE_FULL };
@@ -198,6 +193,18 @@ class LoraMesh : public Component {
   std::array<uint8_t, CONTROL_PLANE_KEY_SIZE> control_plane_key_{};
   bool fabric_key_valid_{false};
   PacketAdmission packet_admission_;
+
+  // Frame-counter reservation is nonce-safety-critical. Keep every mutation
+  // path and its coupled state private so origination cannot bypass durable
+  // reservation by overriding or directly changing the current range.
+  bool next_frame_counter_(uint32_t &frame_counter);
+  bool persist_frame_counter_(uint32_t counter);
+  bool load_frame_counter_();
+  bool setup_complete_{false};
+  uint32_t frame_counter_{0};
+  static constexpr uint32_t FRAME_COUNTER_BATCH = 1000;
+  uint32_t frame_counter_persist_threshold_{0};
+  ESPPreferenceObject frame_counter_pref_{};
 
   // Replay high-water state is safety-critical: only admit_replay_counter_()
   // may mutate it so accepted sources can never be evicted under pressure.
@@ -216,25 +223,15 @@ class LoraMesh : public Component {
   TemplatableValue<std::string> node_id_template_;
   bool has_node_id_{false};
   bool upstream_connected_{false};
-  bool setup_complete_{false};
   bool hello_update_pending_{false};
   uint8_t max_hops_{8};
   uint32_t discovery_interval_ms_{30000};
   uint32_t seen_cache_ttl_ms_{120000};
   bool forward_messages_{true};
-  uint32_t frame_counter_{0};
   uint32_t last_hello_{0};
   uint32_t last_expire_check_{0};
   uint32_t last_diag_publish_{0};
   static constexpr uint32_t HELLO_UPDATE_MIN_INTERVAL_MS = 1000;
-
-  // ── Frame counter persistence (batched NVS writes) ────────────────────
-  // We persist frame_counter_ in batches: on boot we load the persisted value
-  // (which was written ahead by FRAME_COUNTER_BATCH) and set our counter to
-  // that value. On TX we only write to NVS when we exhaust the current batch.
-  static constexpr uint32_t FRAME_COUNTER_BATCH = 1000;
-  uint32_t frame_counter_persist_threshold_{0};  // write NVS when frame_counter_ >= this
-  ESPPreferenceObject frame_counter_pref_{};
 
   // Fixed-size arrays (sizes set by LORA_MESH_MAX_ROUTES / LORA_MESH_SEEN_CACHE_SIZE defines)
   RouteTable routing_table_;

@@ -116,8 +116,12 @@ void Component::mark_failed() {}
 
 // ─── Fake preferences backend for host tests ─────────────────────────────────
 
-// In-memory key-value store keyed by (hash, size) for the preferences system.
+// Durable and staged key-value stores model ESP32 NVS: save() stages a value
+// in RAM, while sync() commits staged values so they survive power loss.
 static std::unordered_map<uint32_t, std::vector<uint8_t>> g_pref_store;
+static std::unordered_map<uint32_t, std::vector<uint8_t>> g_pref_staged;
+static bool g_pref_save_succeeds = true;
+static bool g_pref_sync_succeeds = true;
 
 struct FakePreferenceBackend : public PreferenceBackend {
   uint32_t key;
@@ -126,7 +130,10 @@ struct FakePreferenceBackend : public PreferenceBackend {
   FakePreferenceBackend(uint32_t key, size_t data_size) : key(key), data_size(data_size) {}
 
   bool save(const uint8_t *data, size_t len) override {
-    g_pref_store[this->key].assign(data, data + len);
+    if (!g_pref_save_succeeds) {
+      return false;
+    }
+    g_pref_staged[this->key].assign(data, data + len);
     return true;
   }
 
@@ -157,9 +164,19 @@ struct FakePreferences : public Preferences {
     return ESPPreferenceObject(ptr);
   }
 
-  bool sync() override { return true; }
+  bool sync() override {
+    if (!g_pref_sync_succeeds) {
+      return false;
+    }
+    for (auto &[key, value] : g_pref_staged) {
+      g_pref_store[key] = value;
+    }
+    g_pref_staged.clear();
+    return true;
+  }
   bool reset() override {
     g_pref_store.clear();
+    g_pref_staged.clear();
     return true;
   }
 };
@@ -168,7 +185,18 @@ static FakePreferences g_fake_prefs;
 ESPPreferences *global_preferences = &g_fake_prefs;  // NOLINT
 
 // Test helper: clear all persisted preferences (for test isolation).
-void test_preferences_clear() { g_pref_store.clear(); }
+void test_preferences_clear() {
+  g_pref_store.clear();
+  g_pref_staged.clear();
+  g_pref_save_succeeds = true;
+  g_pref_sync_succeeds = true;
+}
+
+void test_preferences_set_save_succeeds(bool succeeds) { g_pref_save_succeeds = succeeds; }
+
+void test_preferences_set_sync_succeeds(bool succeeds) { g_pref_sync_succeeds = succeeds; }
+
+void test_preferences_simulate_power_loss() { g_pref_staged.clear(); }
 
 void test_preferences_put_u32(uint32_t key, uint32_t value) {
   const auto *bytes = reinterpret_cast<const uint8_t *>(&value);

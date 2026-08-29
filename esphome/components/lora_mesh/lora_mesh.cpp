@@ -86,7 +86,11 @@ void LoraMesh::setup() {
     rc = ReplayEntry{};
   }
 
-  this->load_frame_counter_();
+  if (!this->load_frame_counter_()) {
+    ESP_LOGE(TAG, "Could not durably reserve a frame-counter range; marking failed");
+    this->mark_failed();
+    return;
+  }
 
   if (this->radio_ == nullptr) {
     ESP_LOGE(TAG, "No radio configured — marking failed");
@@ -823,29 +827,43 @@ void LoraMesh::publish_diagnostics_() {
 // ─── Frame counter persistence ────────────────────────────────────────────────
 
 bool LoraMesh::next_frame_counter_(uint32_t &frame_counter) {
+  if (!this->setup_complete_) {
+    ESP_LOGE(TAG, "LoraMesh setup is incomplete; refusing to originate a packet");
+    return false;
+  }
   if (this->frame_counter_ == std::numeric_limits<uint32_t>::max()) {
     ESP_LOGE(TAG, "Frame counter exhausted; refusing to originate another packet to prevent nonce reuse");
     return false;
   }
-  ++this->frame_counter_;
-  // Persist to NVS when we exceed the batch threshold.
-  if (this->frame_counter_ >= this->frame_counter_persist_threshold_) {
-    this->persist_frame_counter_();
+  uint32_t next_counter = this->frame_counter_ + 1;
+  // Reserve and durably commit the next batch before its first counter can be used.
+  if (next_counter >= this->frame_counter_persist_threshold_ && !this->persist_frame_counter_(next_counter)) {
+    ESP_LOGE(TAG, "Could not durably reserve the next frame-counter range; refusing origination");
+    return false;
   }
+  this->frame_counter_ = next_counter;
   frame_counter = this->frame_counter_;
   return true;
 }
 
-void LoraMesh::persist_frame_counter_() {
+bool LoraMesh::persist_frame_counter_(uint32_t counter) {
   // Write ahead by FRAME_COUNTER_BATCH so on next boot we resume from a safe value.
-  uint32_t remaining = std::numeric_limits<uint32_t>::max() - this->frame_counter_;
-  uint32_t persisted_val = this->frame_counter_ + std::min(FRAME_COUNTER_BATCH, remaining);
-  this->frame_counter_pref_.save(&persisted_val);
+  uint32_t remaining = std::numeric_limits<uint32_t>::max() - counter;
+  uint32_t persisted_val = counter + std::min(FRAME_COUNTER_BATCH, remaining);
+  if (!this->frame_counter_pref_.save(&persisted_val)) {
+    ESP_LOGE(TAG, "Failed to save frame-counter reservation");
+    return false;
+  }
+  if (!global_preferences->sync()) {
+    ESP_LOGE(TAG, "Failed to sync frame-counter reservation");
+    return false;
+  }
   this->frame_counter_persist_threshold_ = persisted_val;
   ESP_LOGD(TAG, "Frame counter persisted (next_boot=%" PRIu32 ")", persisted_val);
+  return true;
 }
 
-void LoraMesh::load_frame_counter_() {
+bool LoraMesh::load_frame_counter_() {
   uint32_t hash = fnv1a_str(std::string(NVS_PREFIX_FRAME_COUNTER) + this->node_id_str_);
   this->frame_counter_pref_ = global_preferences->make_preference<uint32_t>(hash, true);
 
@@ -859,7 +877,7 @@ void LoraMesh::load_frame_counter_() {
   }
   // Persist immediately so if we crash before the first batch completes,
   // next boot still has a safe-ahead value. This also sets the next threshold.
-  this->persist_frame_counter_();
+  return this->persist_frame_counter_(this->frame_counter_);
 }
 
 // ─── Replay protection ────────────────────────────────────────────────────────
