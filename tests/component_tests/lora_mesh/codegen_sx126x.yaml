@@ -1,6 +1,0 @@
-substitutions:
-  codegen_name: lora-mesh-codegen-sx126x
-
-packages:
-  base: !include codegen_esp32_idf.yaml
-  lora_mesh: !include ../../components/lora_mesh/test.esp32-idf.yaml
