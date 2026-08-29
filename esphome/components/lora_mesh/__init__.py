@@ -8,8 +8,9 @@ from esphome.components import binary_sensor, sensor, text_sensor
 from esphome.components.sx126x import SX126x
 from esphome.components.sx127x import SX127x
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_ON_MESSAGE, CONF_PAYLOAD
+from esphome.const import CONF_FILTERS, CONF_ID, CONF_ON_MESSAGE, CONF_PAYLOAD
 from esphome.core import ID
+import esphome.final_validate as fv
 
 CODEOWNERS = ["@dj-fiorex"]
 MULTI_CONF = False
@@ -128,6 +129,25 @@ CONFIG_SCHEMA = cv.All(
     ).extend(cv.COMPONENT_SCHEMA),
     cv.only_on_esp32,
 )
+
+
+def _final_validate(config):
+    routing_table_sensor_id = config.get(CONF_ROUTING_TABLE_SENSOR_ID)
+    if routing_table_sensor_id is None:
+        return config
+
+    full_config = fv.full_config.get()
+    sensor_path = full_config.get_path_for_id(routing_table_sensor_id)[:-1]
+    sensor_config = full_config.get_config_for_path(sensor_path)
+    if sensor_config.get(CONF_FILTERS):
+        raise cv.Invalid(
+            f"'{CONF_ROUTING_TABLE_SENSOR_ID}' does not support text sensor filters; "
+            "filters copy the full routing table and allocate on every diagnostic publication"
+        )
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate
 
 # ── Code generation ────────────────────────────────────────────────────────────
 

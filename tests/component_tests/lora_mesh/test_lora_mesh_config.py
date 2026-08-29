@@ -1,9 +1,18 @@
 import pytest
 
 from esphome import automation, config_validation as cv
-from esphome.components.lora_mesh import CONFIG_SCHEMA
-from esphome.const import KEY_CORE, KEY_TARGET_PLATFORM, Platform, PlatformFramework
-from esphome.core import CORE
+from esphome.components.lora_mesh import CONFIG_SCHEMA, FINAL_VALIDATE_SCHEMA
+from esphome.config import Config
+from esphome.const import (
+    CONF_FILTERS,
+    CONF_ID,
+    KEY_CORE,
+    KEY_TARGET_PLATFORM,
+    Platform,
+    PlatformFramework,
+)
+from esphome.core import CORE, ID
+import esphome.final_validate as fv
 from tests.component_tests.types import SetCoreConfigCallable
 
 VALID_FABRIC_KEY = "00112233445566778899aabbccddeeff"
@@ -97,6 +106,22 @@ def test_nearest_gateway_diagnostic_uses_canonical_name() -> None:
     config = _validate_lora_mesh_config(nearest_gateway_sensor_id="nearest_gateway")
 
     assert config["nearest_gateway_sensor_id"].id == "nearest_gateway"
+
+
+def test_routing_table_diagnostic_rejects_text_sensor_filters() -> None:
+    config = _validate_lora_mesh_config(routing_table_sensor_id="routing_table")
+    routing_table_id = ID("routing_table", is_declaration=True)
+    full_config = Config()
+    full_config["text_sensor"] = [
+        {CONF_ID: routing_table_id, CONF_FILTERS: [{"to_upper": {}}]}
+    ]
+    full_config.declare_ids.append((routing_table_id, ["text_sensor", 0, CONF_ID]))
+    token = fv.full_config.set(full_config)
+    try:
+        with pytest.raises(cv.Invalid, match="does not support text sensor filters"):
+            FINAL_VALIDATE_SCHEMA(config)
+    finally:
+        fv.full_config.reset(token)
 
 
 @pytest.mark.parametrize("discovery_interval", ("0ms", "1ms", "4ms"))

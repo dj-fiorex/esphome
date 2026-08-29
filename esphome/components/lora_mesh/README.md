@@ -166,6 +166,8 @@ lora_mesh:
 
 `nearest_gateway_sensor_id` publishes the eight-character hexadecimal Node ID selected by hops, Path RSSI, and Node
 ID tie-break. `gateway_available_sensor_id` is true when this Node has Upstream Connectivity or can reach a Gateway.
+The text sensor referenced by `routing_table_sensor_id` must not configure text-sensor filters: the shared filter
+pipeline copies its input by value, which would reintroduce recurring heap allocation for the full routing table.
 
 ## Public C++ interface
 
