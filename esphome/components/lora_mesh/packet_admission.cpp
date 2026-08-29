@@ -95,6 +95,9 @@ bool PacketAdmission::validate_hello_(const PacketHeader &header, std::span<cons
 }
 
 bool PacketAdmission::validate_data_envelope_(const PacketHeader &header, std::span<const uint8_t> packet) {
+  if ((header.flags & ~(FLAG_IS_GATEWAY | FLAG_IS_BROADCAST)) != 0) {
+    return false;
+  }
   if (packet.size() < MESH_HEADER_SIZE + 1) {
     return false;
   }
