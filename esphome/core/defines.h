@@ -464,6 +464,12 @@
 
 #define USE_DASHBOARD_IMPORT
 
+// lora_mesh component — defines for static analysis
+#define LORA_MESH_MAX_ROUTES 16
+#define LORA_MESH_SEEN_CACHE_SIZE 32
+#define LORA_MESH_TX_QUEUE_SIZE 8
+#define LORA_MESH_USE_SX126X
+
 // Default counts for static analysis
 #define CONTROLLER_REGISTRY_MAX 2
 #define ESPHOME_AREA_COUNT 10
